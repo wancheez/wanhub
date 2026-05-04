@@ -16,10 +16,23 @@ router = Router(name="chat")
 log = logging.getLogger("app")
 
 TG_MAX = 4000  # Telegram limit is 4096; leave headroom for HTML tags
+MAX_QUOTED_CHARS = 1000  # cap reply-context quote to keep Claude prompts small
 
 # Trigger: message starts with the word "Чат" (any case), optionally followed
 # by punctuation/space. Anything else is ignored.
 CHAT_PREFIX_RE = re.compile(r"^\s*чат\b[\s,.:;!?-]*", re.IGNORECASE)
+
+
+def format_reply_context(quoted: str | None, author: str | None) -> str | None:
+    """Markdown-quote preamble from a replied-to message. None if nothing to quote."""
+    if not quoted or not quoted.strip():
+        return None
+    quoted = quoted.strip()
+    if len(quoted) > MAX_QUOTED_CHARS:
+        quoted = quoted[:MAX_QUOTED_CHARS].rstrip() + "…"
+    author = author or "пользователя"
+    quoted_block = "\n".join(f"> {line}" for line in quoted.splitlines())
+    return f"(в ответ на сообщение от {author}):\n{quoted_block}"
 
 
 @router.message(Command("reset"))
@@ -64,6 +77,19 @@ async def _do_chat(message: Message, text: str) -> None:
     text = text.strip()
     if not text:
         return
+
+    if message.reply_to_message is not None:
+        replied = message.reply_to_message
+        quoted = replied.text or replied.caption
+        author: str | None = None
+        if replied.from_user is not None:
+            if replied.from_user.is_bot:
+                author = "бота"
+            else:
+                author = replied.from_user.full_name or replied.from_user.username or None
+        context = format_reply_context(quoted, author)
+        if context:
+            text = f"{context}\n\n{text}"
 
     assert message.bot is not None  # aiogram populates this for incoming updates
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
