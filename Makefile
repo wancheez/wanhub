@@ -3,7 +3,7 @@ POETRY := $(shell command -v poetry 2>/dev/null || echo $(HOME)/.local/bin/poetr
 HOST ?= 0.0.0.0
 PORT ?= 8000
 
-.PHONY: help install update lock run dev test clean \
+.PHONY: help install update lock run dev test coverage clean \
         service-install service-uninstall service-restart service-status service-logs \
         lint format typecheck check fix
 
@@ -15,6 +15,7 @@ help:
 	@echo "  run                - run server (no reload)"
 	@echo "  dev                - run server with auto-reload"
 	@echo "  test               - run pytest"
+	@echo "  coverage           - run pytest with coverage report (term + htmlcov/)"
 	@echo "  clean              - remove caches and __pycache__"
 	@echo ""
 	@echo "Quality:"
@@ -48,6 +49,9 @@ dev:
 
 test:
 	$(POETRY) run pytest tests/ -v
+
+coverage:
+	$(POETRY) run pytest tests/ --cov=app --cov-branch --cov-report=term --cov-report=html
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

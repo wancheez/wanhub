@@ -1,3 +1,6 @@
+[![CI](https://github.com/wancheez/wanhub/actions/workflows/ci.yml/badge.svg)](https://github.com/wancheez/wanhub/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/wancheez/wanhub/branch/main/graph/badge.svg)](https://codecov.io/gh/wancheez/wanhub)
+
 # wanhub
 
 FastAPI-сервер + Telegram-бот для Raspberry Pi 5 с интеграцией Claude API.

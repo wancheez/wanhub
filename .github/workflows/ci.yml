@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: lint + typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Lint (ruff check)
+        run: poetry run ruff check app/ tests/
+
+      - name: Lint (ruff format --check)
+        run: poetry run ruff format --check app/ tests/
+
+      - name: Typecheck (mypy)
+        run: poetry run mypy app/
+
+      - name: Tests (pytest + coverage)
+        run: poetry run pytest tests/ -v --cov=app --cov-branch --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false
