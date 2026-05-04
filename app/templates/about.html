@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}О себе{% endblock %}
+
+{% block content %}
+<h1>О себе</h1>
+<div class="card">
+    <p><span class="label">Имя:</span> {{ profile.name }}</p>
+    <p><span class="label">Род занятий:</span> {{ profile.occupation }}</p>
+    <p><span class="label">Интересы:</span> {{ profile.interests | join(", ") }}</p>
+    <p><span class="label">О себе:</span> {{ profile.bio }}</p>
+</div>
+
+<h2>ASCII-арт от Claude</h2>
+<div class="card">
+    <button id="ascii-btn" type="button">🎨 Сгенерировать</button>
+    <div id="ascii-status" class="ascii-status"></div>
+    <pre id="ascii-art" class="ascii-art"></pre>
+</div>
+
+<p class="links">
+    <a href="/device">Устройство</a> &middot;
+    <a href="/ping">/ping</a> &middot;
+    <a href="/docs">/docs</a>
+</p>
+
+<script>
+const btn = document.getElementById("ascii-btn");
+const status = document.getElementById("ascii-status");
+const art = document.getElementById("ascii-art");
+
+btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    status.textContent = "Claude думает...";
+    art.textContent = "";
+    try {
+        const r = await fetch("/api/ascii", { method: "POST" });
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({ detail: r.statusText }));
+            status.textContent = "Ошибка: " + (err.detail || r.statusText);
+            return;
+        }
+        const data = await r.json();
+        status.textContent = "Тема: " + data.subject;
+        art.textContent = data.art;
+    } catch (e) {
+        status.textContent = "Сетевая ошибка: " + e.message;
+    } finally {
+        btn.disabled = false;
+    }
+});
+</script>
+{% endblock %}

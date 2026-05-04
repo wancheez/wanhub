@@ -1,0 +1,77 @@
+[tool.poetry]
+name = "wanhub"
+version = "0.1.0"
+description = "FastAPI веб-сервер + Telegram-бот для Raspberry Pi с интеграцией Claude"
+authors = ["Иван Ерохин <wancheez@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.13,<3.15"
+fastapi = "^0.136.1"
+uvicorn = "^0.46.0"
+jinja2 = "^3.1.6"
+pydantic = ">=2.7,<2.13"
+anthropic = "^0.97.0"
+python-dotenv = "^1.2.2"
+aiogram = "^3.27.0"
+httpx = "^0.28.1"
+ddgs = "^9.6.4"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+ruff = "^0.15.12"
+mypy = "^1.20.2"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = [".venv", "logs"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "UP",    # pyupgrade
+    "RUF",   # ruff-specific
+    "SIM",   # flake8-simplify
+    "C4",    # flake8-comprehensions
+    "ASYNC", # flake8-async (catches sync calls in async fns)
+]
+ignore = [
+    "E501",   # line-length — handled by formatter
+    "B008",   # function-call-in-default-argument (FastAPI Depends pattern)
+    "RUF001", # ambiguous-unicode-character-string (Russian quotes/dashes)
+    "RUF002", # same, in docstrings
+    "RUF003", # same, in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+strict_optional = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+explicit_package_bases = true
+exclude = ["^\\.venv/", "^logs/"]
+
+# Libraries without bundled type stubs.
+[[tool.mypy.overrides]]
+module = ["ddgs.*"]
+ignore_missing_imports = true

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Устройство{% endblock %}
+
+{% block content %}
+<h1>Информация об устройстве</h1>
+
+<div class="card">
+    <p><span class="label">Модель:</span> <span id="model">{{ device.model }}</span></p>
+    <p><span class="label">Hostname:</span> <span id="hostname">{{ device.hostname }}</span></p>
+    <p><span class="label">Ядро:</span> <span id="kernel">{{ device.kernel }}</span></p>
+    <p><span class="label">Аптайм:</span> <span id="uptime">{{ device.uptime_seconds }}</span> с</p>
+</div>
+
+<h2>CPU</h2>
+<div class="card">
+    <p><span class="label">Ядер:</span> <span id="cpu_count">{{ device.cpu_count }}</span></p>
+    <p><span class="label">Температура:</span> <span id="cpu_temp">{{ device.cpu_temp_c }}</span> &deg;C</p>
+    <p><span class="label">Частота:</span> <span id="cpu_freq">{{ device.cpu_freq_mhz }}</span> МГц</p>
+    <p><span class="label">Load avg (1/5/15):</span>
+        <span id="load_1">{{ device.load_avg_1 }}</span> /
+        <span id="load_5">{{ device.load_avg_5 }}</span> /
+        <span id="load_15">{{ device.load_avg_15 }}</span>
+    </p>
+</div>
+
+<h2>Память</h2>
+<div class="card">
+    <p>
+        <span id="mem_used">{{ device.memory_used_mb }}</span> /
+        <span id="mem_total">{{ device.memory_total_mb }}</span> МБ
+        (<span id="mem_pct">{{ device.memory_used_percent }}</span>%)
+    </p>
+    <div class="bar"><div class="bar-fill" id="mem_bar" style="width: {{ device.memory_used_percent }}%"></div></div>
+</div>
+
+<h2>Диск (/)</h2>
+<div class="card">
+    <p>
+        <span id="disk_used">{{ device.disk_used_gb }}</span> /
+        <span id="disk_total">{{ device.disk_total_gb }}</span> ГБ
+        (<span id="disk_pct">{{ device.disk_used_percent }}</span>%)
+    </p>
+    <div class="bar"><div class="bar-fill" id="disk_bar" style="width: {{ device.disk_used_percent }}%"></div></div>
+</div>
+
+<p class="links">
+    <a href="/">← На главную</a> &middot;
+    JSON: <a href="/api/device">/api/device</a>
+</p>
+
+<script>
+function fmtUptime(s) {
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = Math.floor(s % 60);
+    return `${d}д ${h}ч ${m}м ${sec}с`;
+}
+
+async function refresh() {
+    try {
+        const r = await fetch("/api/device");
+        if (!r.ok) return;
+        const d = await r.json();
+        document.getElementById("uptime").textContent = fmtUptime(d.uptime_seconds);
+        document.getElementById("cpu_temp").textContent = d.cpu_temp_c ?? "—";
+        document.getElementById("cpu_freq").textContent = d.cpu_freq_mhz ?? "—";
+        document.getElementById("load_1").textContent = d.load_avg_1;
+        document.getElementById("load_5").textContent = d.load_avg_5;
+        document.getElementById("load_15").textContent = d.load_avg_15;
+        document.getElementById("mem_used").textContent = d.memory_used_mb;
+        document.getElementById("mem_total").textContent = d.memory_total_mb;
+        document.getElementById("mem_pct").textContent = d.memory_used_percent;
+        document.getElementById("mem_bar").style.width = d.memory_used_percent + "%";
+        document.getElementById("disk_used").textContent = d.disk_used_gb;
+        document.getElementById("disk_total").textContent = d.disk_total_gb;
+        document.getElementById("disk_pct").textContent = d.disk_used_percent;
+        document.getElementById("disk_bar").style.width = d.disk_used_percent + "%";
+    } catch (e) {}
+}
+
+document.getElementById("uptime").textContent = fmtUptime(parseFloat(document.getElementById("uptime").textContent));
+setInterval(refresh, 2000);
+</script>
+{% endblock %}

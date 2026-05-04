@@ -1,0 +1,36 @@
+[Unit]
+Description=wanhub — FastAPI + Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__PROJECT_DIR__/.env
+
+ExecStart=__PROJECT_DIR__/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Restart policy — graceful crash recovery
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Logs go to journald (use `journalctl -u wanhub -f` to tail).
+# The app also keeps writing logs/app.log via setup_logging(); both work in parallel.
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__PROJECT_DIR__/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
