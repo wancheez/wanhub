@@ -54,7 +54,7 @@ Polling, не webhook — Pi сам ходит в `api.telegram.org`. Это н�
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-user>/wanhub.git
+git clone https://github.com/wancheez/wanhub.git
 cd wanhub
 
 # 1. Зависимости (нужен Python 3.13+, Poetry)
