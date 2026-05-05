@@ -6,7 +6,12 @@ import anthropic
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    Message,
+    MessageOriginChat,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
+)
 
 from app.bot.format import for_telegram
 from app.bot.skills import try_skills
@@ -19,20 +24,63 @@ TG_MAX = 4000  # Telegram limit is 4096; leave headroom for HTML tags
 MAX_QUOTED_CHARS = 1000  # cap reply-context quote to keep Claude prompts small
 
 # Trigger: message starts with the word "Чат" (any case), optionally followed
-# by punctuation/space. Anything else is ignored.
+# by punctuation/space. In groups required; in private chats optional.
 CHAT_PREFIX_RE = re.compile(r"^\s*чат\b[\s,.:;!?-]*", re.IGNORECASE)
+
+
+def extract_body(text: str, is_private: bool) -> tuple[str | None, bool]:
+    """Return (body, had_prefix). body is None when the message is not
+    addressed to the bot (group chat without «Чат»). had_prefix is True
+    when the user typed the «Чат» trigger explicitly — used to decide
+    whether to nudge them on an empty body.
+    """
+    m = CHAT_PREFIX_RE.match(text)
+    if m:
+        return text[m.end() :].strip(), True
+    if is_private:
+        return text.strip(), False
+    return None, False
 
 
 def format_reply_context(quoted: str | None, author: str | None) -> str | None:
     """Markdown-quote preamble from a replied-to message. None if nothing to quote."""
+    return _format_quote_block(quoted, author or "пользователя", "в ответ на сообщение от")
+
+
+def format_forward_context(quoted: str | None, author: str | None) -> str | None:
+    """Markdown-quote preamble for a forwarded message. None if nothing to quote."""
+    return _format_quote_block(quoted, author or "источника", "переслано от")
+
+
+def _format_quote_block(quoted: str | None, author: str, prefix: str) -> str | None:
     if not quoted or not quoted.strip():
         return None
     quoted = quoted.strip()
     if len(quoted) > MAX_QUOTED_CHARS:
         quoted = quoted[:MAX_QUOTED_CHARS].rstrip() + "…"
-    author = author or "пользователя"
     quoted_block = "\n".join(f"> {line}" for line in quoted.splitlines())
-    return f"(в ответ на сообщение от {author}):\n{quoted_block}"
+    return f"({prefix} {author}):\n{quoted_block}"
+
+
+def _forward_origin_author(message: Message) -> str | None:
+    """Pretty author label for `message.forward_origin`. None if not a forward."""
+    origin = message.forward_origin
+    if origin is None:
+        return None
+    if isinstance(origin, MessageOriginUser):
+        u = origin.sender_user
+        return u.full_name or u.username or None
+    if isinstance(origin, MessageOriginHiddenUser):
+        return origin.sender_user_name or None
+    if isinstance(origin, MessageOriginChat):
+        c = origin.sender_chat
+        return c.title or c.username or None
+    # remaining: MessageOriginChannel
+    c = origin.chat
+    title = c.title or c.username
+    if title and origin.author_signature:
+        return f"{title} ({origin.author_signature})"
+    return title
 
 
 @router.message(Command("reset"))
@@ -56,12 +104,13 @@ async def cmd_chat(message: Message) -> None:
 @router.message(F.text & ~F.text.startswith("/"))
 async def chat_prefix(message: Message) -> None:
     text = message.text or ""
-    m = CHAT_PREFIX_RE.match(text)
-    if not m:
-        return  # not addressed to the bot — silently ignore
-    body = text[m.end() :].strip()
+    is_private = message.chat.type == "private"
+    body, had_prefix = extract_body(text, is_private)
+    if body is None:
+        return  # group chat without «Чат» trigger — silently ignore
     if not body:
-        await message.answer("Чат — а дальше что? Напиши вопрос после слова «Чат».")
+        if had_prefix:
+            await message.answer("Чат — а дальше что? Напиши вопрос после слова «Чат».")
         return
     await _route(message, body)
 
@@ -78,10 +127,18 @@ async def _do_chat(message: Message, text: str) -> None:
     if not text:
         return
 
-    if message.reply_to_message is not None:
+    if message.forward_origin is not None:
+        # The user forwarded a message to the bot. Replace the body with a
+        # quote block — the forwarded text was already inside `text`, this
+        # just attributes it so Claude doesn't think the user wrote it.
+        author = _forward_origin_author(message)
+        fwd = format_forward_context(text, author)
+        if fwd:
+            text = fwd
+    elif message.reply_to_message is not None:
         replied = message.reply_to_message
         quoted = replied.text or replied.caption
-        author: str | None = None
+        author = None
         if replied.from_user is not None:
             if replied.from_user.is_bot:
                 author = "бота"
@@ -91,10 +148,22 @@ async def _do_chat(message: Message, text: str) -> None:
         if context:
             text = f"{context}\n\n{text}"
 
+    user = message.from_user
+    user_name = (user.full_name or user.username) if user else None
+    user_language = user.language_code if user else None
+    chat_title = message.chat.title  # None for private chats
+
     assert message.bot is not None  # aiogram populates this for incoming updates
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        reply = await chat(message.chat.id, text)
+        reply = await chat(
+            message.chat.id,
+            text,
+            chat_type=message.chat.type,
+            chat_title=chat_title,
+            user_name=user_name,
+            user_language=user_language,
+        )
     except anthropic.AuthenticationError:
         await message.answer("⚠️ Anthropic API key отсутствует или недействителен.")
         return

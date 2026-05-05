@@ -1,7 +1,9 @@
 import logging
+from datetime import datetime
 
 from anthropic import AsyncAnthropic
 
+from app.core.config import TELEGRAM_BOT_USERNAME
 from app.prompts import load as load_prompt
 from app.services.chat_history import (
     append_message,
@@ -17,7 +19,40 @@ MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20  # how many user+assistant turns to keep in context
 MAX_PAUSE_TURN_ITERATIONS = 3  # cap server-side tool loop resumes
 
-SYSTEM_PROMPT = load_prompt("chat").replace("{model}", CHAT_MODEL)
+_PROMPT_TEMPLATE = load_prompt("chat")
+
+_CHAT_TYPE_LABEL = {
+    "private": "личный диалог 1-на-1 с пользователем",
+    "group": "групповой чат",
+    "supergroup": "групповой чат (супергруппа)",
+    "channel": "канал",
+}
+
+
+def _system_prompt(
+    chat_type: str = "private",
+    *,
+    chat_title: str | None = None,
+    user_name: str | None = None,
+    user_language: str | None = None,
+) -> str:
+    """Build the system prompt at call time so per-call context (chat type,
+    user, time) gets injected. Static placeholders (model, bot handle) are
+    just config substitutions.
+    """
+    username = TELEGRAM_BOT_USERNAME or "wanbot"  # bare, no @ — prompt adds it where needed
+    label = _CHAT_TYPE_LABEL.get(chat_type, chat_type)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M (%a, локальное время Pi)")
+    return (
+        _PROMPT_TEMPLATE.replace("{model}", CHAT_MODEL)
+        .replace("{bot_username}", username)
+        .replace("{chat_type}", label)
+        .replace("{chat_title}", chat_title or "—")
+        .replace("{user_name}", user_name or "—")
+        .replace("{user_language}", user_language or "—")
+        .replace("{now}", now)
+    )
+
 
 # Anthropic-hosted tools — run on Anthropic infra, no client implementation needed.
 TOOLS = [
@@ -42,16 +77,30 @@ def history_size(chat_id: int) -> int:
     return count_messages(chat_id)
 
 
-async def chat(chat_id: int, user_message: str) -> str:
+async def chat(
+    chat_id: int,
+    user_message: str,
+    chat_type: str = "private",
+    *,
+    chat_title: str | None = None,
+    user_name: str | None = None,
+    user_language: str | None = None,
+) -> str:
     history = load_history(chat_id, MAX_HISTORY_MESSAGES - 1)
     messages = [*history, {"role": "user", "content": user_message}]
     client = _get_client()
+    system = _system_prompt(
+        chat_type,
+        chat_title=chat_title,
+        user_name=user_name,
+        user_language=user_language,
+    )
 
     for _ in range(MAX_PAUSE_TURN_ITERATIONS):
         async with client.messages.stream(
             model=CHAT_MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=messages,  # type: ignore[arg-type]  # SDK TypedDicts; plain dicts work at runtime
             tools=TOOLS,  # type: ignore[arg-type]
         ) as stream:

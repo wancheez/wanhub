@@ -6,7 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.bot.auth import ChatWhitelistMiddleware
 from app.bot.handlers import register_handlers
-from app.core.config import TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_BOT_TOKEN
+from app.core.config import TELEGRAM_ADMIN_ID, TELEGRAM_BOT_TOKEN
 
 log = logging.getLogger("app")
 
@@ -26,11 +26,11 @@ async def start_bot() -> None:
         log.info("start_bot: bot disabled (TELEGRAM_BOT_TOKEN not set)")
         return
 
-    if not TELEGRAM_ALLOWED_CHAT_IDS:
+    if TELEGRAM_ADMIN_ID is None:
         log.warning(
-            "start_bot: TELEGRAM_ALLOWED_CHAT_IDS is empty — "
-            "bot will silently ignore all messages. "
-            "Send any message to the bot, find chat_id in logs, then add it."
+            "start_bot: TELEGRAM_ADMIN_ID is not set — "
+            "no one will receive new-chat approval requests, "
+            "and the bot will silently drop every message."
         )
 
     log.info("start_bot: creating Bot/Dispatcher")
@@ -39,12 +39,11 @@ async def start_bot() -> None:
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     dp = Dispatcher()
-    dp.message.middleware(ChatWhitelistMiddleware(TELEGRAM_ALLOWED_CHAT_IDS))
+    middleware = ChatWhitelistMiddleware(TELEGRAM_ADMIN_ID)
+    dp.message.middleware(middleware)
+    dp.callback_query.middleware(middleware)
     register_handlers(dp)
-    log.info(
-        "start_bot: handlers registered, allowed_chat_ids=%s",
-        TELEGRAM_ALLOWED_CHAT_IDS or "<empty>",
-    )
+    log.info("start_bot: handlers registered, admin_id=%s", TELEGRAM_ADMIN_ID)
 
     log.info("start_bot: launching long-polling task")
     _polling_task = asyncio.create_task(
