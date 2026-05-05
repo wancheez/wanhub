@@ -19,6 +19,10 @@ from app.services import chat_whitelist
 CB_APPROVE = "wl:approve:"
 CB_DENY = "wl:deny:"
 
+# Web user registration approve/deny callbacks.
+CB_USER_APPROVE = "wu:approve:"
+CB_USER_DENY = "wu:deny:"
+
 ACK_TEXT = "📨 Запрос на доступ отправлен админу. Жди."
 
 
@@ -88,4 +92,43 @@ async def notify_admin_of_new_chat(
             TELEGRAM_ADMIN_ID,
             _admin_text(chat, user),
             reply_markup=_approval_keyboard(chat.id),
+        )
+
+
+def _user_approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Одобрить", callback_data=f"{CB_USER_APPROVE}{user_id}"
+                ),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"{CB_USER_DENY}{user_id}"),
+            ]
+        ]
+    )
+
+
+async def notify_admin_of_web_registration(user_id: int, username: str) -> None:
+    """Ping admin about a new web-account registration.
+
+    Best-effort: does nothing if the bot isn't running or admin id is unset.
+    Imports the Bot instance lazily to avoid a circular import (notify is
+    imported from auth, which is imported from main, which starts the bot).
+    """
+    if TELEGRAM_ADMIN_ID is None:
+        return
+    from app.bot import main as bot_main
+
+    bot = bot_main.bot
+    if bot is None:
+        return  # bot not running — admin can approve via /web users CLI later
+
+    text = (
+        "🌐 <b>Регистрация на сайте</b>\n"
+        f"Имя: <b>{escape(username)}</b>\n"
+        f"user_id: <code>{user_id}</code>"
+    )
+    with suppress(TelegramAPIError):
+        await bot.send_message(
+            TELEGRAM_ADMIN_ID, text, reply_markup=_user_approval_keyboard(user_id)
         )

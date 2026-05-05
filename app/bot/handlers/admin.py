@@ -16,9 +16,15 @@ from aiogram.filters import ChatMemberUpdatedFilter
 from aiogram.filters.chat_member_updated import IS_NOT_MEMBER, MEMBER
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
-from app.bot.notify import CB_APPROVE, CB_DENY, notify_admin_of_new_chat
+from app.bot.notify import (
+    CB_APPROVE,
+    CB_DENY,
+    CB_USER_APPROVE,
+    CB_USER_DENY,
+    notify_admin_of_new_chat,
+)
 from app.core.config import TELEGRAM_ADMIN_ID
-from app.services import chat_whitelist
+from app.services import chat_whitelist, web_users
 
 router = Router(name="admin")
 log = logging.getLogger("app")
@@ -42,6 +48,16 @@ async def on_approve(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith(CB_DENY))
 async def on_deny(cb: CallbackQuery) -> None:
     await _decide(cb, approve=False)
+
+
+@router.callback_query(F.data.startswith(CB_USER_APPROVE))
+async def on_user_approve(cb: CallbackQuery) -> None:
+    await _decide_user(cb, approve=True)
+
+
+@router.callback_query(F.data.startswith(CB_USER_DENY))
+async def on_user_deny(cb: CallbackQuery) -> None:
+    await _decide_user(cb, approve=False)
 
 
 async def _decide(cb: CallbackQuery, *, approve: bool) -> None:
@@ -78,5 +94,37 @@ async def _decide(cb: CallbackQuery, *, approve: bool) -> None:
             await cb.bot.send_message(chat_id, APPROVED_CHAT_NOTICE)
         except TelegramAPIError:
             log.warning("could not notify approved chat_id=%s", chat_id)
+
+    await cb.answer(label)
+
+
+async def _decide_user(cb: CallbackQuery, *, approve: bool) -> None:
+    """Approve / deny a web registration from the admin's DM."""
+    if TELEGRAM_ADMIN_ID is None or cb.from_user.id != TELEGRAM_ADMIN_ID:
+        await cb.answer("Только админ может это делать.", show_alert=True)
+        return
+
+    prefix = CB_USER_APPROVE if approve else CB_USER_DENY
+    raw = (cb.data or "")[len(prefix) :]
+    try:
+        user_id = int(raw)
+    except ValueError:
+        await cb.answer("Битый callback.", show_alert=True)
+        return
+
+    changed = (
+        web_users.approve(user_id, cb.from_user.id)
+        if approve
+        else web_users.deny(user_id, cb.from_user.id)
+    )
+
+    label = "✅ Одобрен" if approve else "❌ Отклонён"
+    if not changed:
+        info = web_users.get_by_id(user_id)
+        label = f"ℹ️ Уже {info['status']}" if info else "ℹ️ Юзер не найден"
+
+    if isinstance(cb.message, Message):
+        with suppress(TelegramBadRequest):
+            await cb.message.edit_text(f"{cb.message.html_text}\n\n<b>{label}</b>")
 
     await cb.answer(label)

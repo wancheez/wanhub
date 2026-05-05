@@ -18,6 +18,9 @@ python-dotenv = "^1.2.2"
 aiogram = "^3.27.0"
 httpx = "^0.28.1"
 ddgs = "^9.6.4"
+bcrypt = "^5.0.0"
+python-multipart = "^0.0.20"
+itsdangerous = "^2.2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Регистрация — wanhub{% endblock %}
+{% block content %}
+<h1>Регистрация</h1>
+
+{% if submitted %}
+    <div class="card">
+        ✅ Заявка отправлена админу. Когда он одобрит — сможешь войти на странице
+        <a href="/login">/login</a>.
+    </div>
+{% else %}
+    {% if error %}
+        <div class="card error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/register" class="auth-form">
+        <label>
+            Имя
+            <input type="text" name="username" value="{{ username }}"
+                   required minlength="3" maxlength="32" autocomplete="username" autofocus>
+        </label>
+        <label>
+            Пароль
+            <input type="password" name="password" required minlength="8"
+                   autocomplete="new-password">
+        </label>
+        <label>
+            Повтори пароль
+            <input type="password" name="password_confirm" required minlength="8"
+                   autocomplete="new-password">
+        </label>
+        <button type="submit">Отправить заявку</button>
+    </form>
+    <p class="muted">Заявка пройдёт одобрение у админа в Telegram.</p>
+    <p class="muted">Уже зарегистрирован? <a href="/login">Войти</a>.</p>
+{% endif %}
+{% endblock %}

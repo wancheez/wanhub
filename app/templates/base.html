@@ -2,10 +2,25 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>{% block title %}My Web Server{% endblock %}</title>
+    <title>{% block title %}wanhub{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+    <nav class="navbar">
+        <a href="/" class="brand">wanhub</a>
+        <span class="nav-links">
+            <a href="/">обо мне</a>
+            {% if current_user %}
+                <a href="/chat">чат</a>
+                <a href="/device">устройство</a>
+                <span class="nav-user">@{{ current_user.username }}</span>
+                <a href="/logout">выйти</a>
+            {% else %}
+                <a href="/login">войти</a>
+                <a href="/register">регистрация</a>
+            {% endif %}
+        </span>
+    </nav>
     {% block content %}{% endblock %}
 </body>
 </html>

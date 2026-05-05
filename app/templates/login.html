@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Вход — wanhub{% endblock %}
+{% block content %}
+<h1>Вход</h1>
+
+{% if error %}
+    <div class="card error">{{ error }}</div>
+{% endif %}
+<form method="post" action="/login" class="auth-form">
+    <input type="hidden" name="next" value="{{ next or '/' }}">
+    <label>
+        Имя
+        <input type="text" name="username" value="{{ username }}"
+               required autocomplete="username" autofocus>
+    </label>
+    <label>
+        Пароль
+        <input type="password" name="password" required autocomplete="current-password">
+    </label>
+    <button type="submit">Войти</button>
+</form>
+<p class="muted">Нет аккаунта? <a href="/register">Зарегистрироваться</a>.</p>
+{% endblock %}

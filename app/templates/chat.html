@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Чат — wanhub{% endblock %}
+{% block content %}
+<h1>Чат</h1>
+
+<div id="chat-container" class="chat">
+    <div id="chat-history" class="chat-history" aria-live="polite"></div>
+
+    <form id="chat-form" class="chat-form">
+        <textarea id="chat-input" placeholder="Напиши сообщение, Enter — отправить, Shift+Enter — перенос строки"
+                  rows="2" maxlength="4000" autofocus required></textarea>
+        <div class="chat-actions">
+            <button type="submit" id="chat-send">Отправить</button>
+            <button type="button" id="chat-ascii" class="btn-secondary">ASCII-арт</button>
+            <button type="button" id="chat-reset" class="btn-secondary">Сбросить историю</button>
+        </div>
+    </form>
+</div>
+
+<script>
+(function () {
+    const historyEl = document.getElementById("chat-history");
+    const formEl = document.getElementById("chat-form");
+    const inputEl = document.getElementById("chat-input");
+    const sendBtn = document.getElementById("chat-send");
+    const resetBtn = document.getElementById("chat-reset");
+
+    function appendBubble(role, label) {
+        const wrap = document.createElement("div");
+        wrap.className = "chat-message chat-message--" + role;
+        const labelEl = document.createElement("div");
+        labelEl.className = "chat-role";
+        labelEl.textContent = label;
+        wrap.appendChild(labelEl);
+        historyEl.appendChild(wrap);
+        return wrap;
+    }
+
+    function renderMessage(role, content) {
+        const wrap = appendBubble(role, role === "user" ? "ты" : "claude");
+        const body = document.createElement("div");
+        body.className = "chat-body";
+        body.textContent = content;
+        wrap.appendChild(body);
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }
+
+    function renderImage(reply, url) {
+        const wrap = appendBubble("assistant", "claude");
+        const caption = document.createElement("div");
+        caption.className = "chat-body";
+        caption.textContent = reply;
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = reply;
+        img.className = "chat-image";
+        img.referrerPolicy = "no-referrer";
+        img.onerror = () => {
+            img.replaceWith(Object.assign(document.createElement("div"), {
+                className: "chat-body chat-error-inline",
+                textContent: "(не удалось загрузить картинку)",
+            }));
+        };
+        wrap.appendChild(caption);
+        wrap.appendChild(img);
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }
+
+    function renderAscii(subject, art) {
+        const wrap = appendBubble("assistant", "ascii: " + subject);
+        const pre = document.createElement("pre");
+        pre.className = "chat-ascii";
+        pre.textContent = art;
+        wrap.appendChild(pre);
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }
+
+    function renderError(text) {
+        const wrap = document.createElement("div");
+        wrap.className = "chat-message chat-message--error";
+        wrap.textContent = "⚠️ " + text;
+        historyEl.appendChild(wrap);
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }
+
+    async function loadHistory() {
+        try {
+            const r = await fetch("/api/chat/history");
+            if (!r.ok) return;
+            const data = await r.json();
+            historyEl.innerHTML = "";
+            data.forEach(m => renderMessage(m.role, m.content));
+        } catch (e) {
+            renderError("не удалось загрузить историю: " + e);
+        }
+    }
+
+    async function sendMessage(text) {
+        renderMessage("user", text);
+        sendBtn.disabled = true;
+        const typing = document.createElement("div");
+        typing.className = "chat-message chat-message--assistant chat-typing";
+        typing.textContent = "claude печатает…";
+        historyEl.appendChild(typing);
+        historyEl.scrollTop = historyEl.scrollHeight;
+
+        try {
+            const r = await fetch("/api/chat", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({message: text}),
+            });
+            typing.remove();
+            if (r.status === 401) {
+                renderError("сессия истекла, перенаправляю на /login");
+                window.location.href = "/login?next=/chat";
+                return;
+            }
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({detail: r.statusText}));
+                renderError(err.detail || "ошибка");
+                return;
+            }
+            const data = await r.json();
+            if (data.image_url) {
+                renderImage(data.reply, data.image_url);
+            } else {
+                renderMessage("assistant", data.reply);
+            }
+        } catch (e) {
+            typing.remove();
+            renderError("сеть упала: " + e);
+        } finally {
+            sendBtn.disabled = false;
+            inputEl.focus();
+        }
+    }
+
+    formEl.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const text = inputEl.value.trim();
+        if (!text) return;
+        inputEl.value = "";
+        sendMessage(text);
+    });
+
+    inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            formEl.requestSubmit();
+        }
+    });
+
+    const asciiBtn = document.getElementById("chat-ascii");
+    asciiBtn.addEventListener("click", async () => {
+        asciiBtn.disabled = true;
+        const typing = document.createElement("div");
+        typing.className = "chat-message chat-message--assistant chat-typing";
+        typing.textContent = "генерирую ASCII…";
+        historyEl.appendChild(typing);
+        historyEl.scrollTop = historyEl.scrollHeight;
+        try {
+            const r = await fetch("/api/ascii", {method: "POST"});
+            typing.remove();
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({detail: r.statusText}));
+                renderError(err.detail || "ошибка");
+                return;
+            }
+            const data = await r.json();
+            renderAscii(data.subject, data.art);
+        } catch (e) {
+            typing.remove();
+            renderError("сеть упала: " + e);
+        } finally {
+            asciiBtn.disabled = false;
+        }
+    });
+
+    resetBtn.addEventListener("click", async () => {
+        if (!confirm("Сбросить историю чата?")) return;
+        const r = await fetch("/api/chat/reset", {method: "POST"});
+        if (r.ok) {
+            historyEl.innerHTML = "";
+        } else {
+            renderError("не удалось сбросить");
+        }
+    });
+
+    loadHistory();
+})();
+</script>
+{% endblock %}

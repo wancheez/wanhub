@@ -36,12 +36,15 @@ def _safe_filename_stem(query: str) -> str:
     return stem or "image"
 
 
-def _extract_intent(text: str) -> dict[str, str] | None:
+def extract_image_intent(text: str) -> dict[str, str] | None:
     """Return {raw, fallback} if the text is an image request, else None.
 
     `raw`      — the user's wording with the leading verb stripped (good for
                  LLM rewriting).
     `fallback` — a regex-cleaned query (used if the LLM rewriter is unavailable).
+
+    Public so the web chat can reuse the same intent matcher without dragging
+    in aiogram-specific handler code.
     """
     m = VERB_RE.match(text.strip())
     if not m:
@@ -62,7 +65,7 @@ class SendImageSkill:
     name = "send_image"
 
     def match(self, text: str) -> dict[str, Any] | None:
-        return _extract_intent(text)
+        return extract_image_intent(text)
 
     async def handle(self, message: Message, params: dict[str, Any]) -> None:
         raw: str = params["raw"]
