@@ -10,7 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 # (e.g. Anthropic clients pick up ANTHROPIC_API_KEY).
 load_dotenv()
 
-from app.api.routes import ascii, auth, chat, device, health, pages  # noqa: E402
+from app.api.routes import ascii, auth, chat, device, health, pages, telemt  # noqa: E402
 from app.bot.main import start_bot, stop_bot  # noqa: E402
 from app.core.config import APP_TITLE, APP_VERSION, STATIC_DIR, WEB_SESSION_SECRET  # noqa: E402
 from app.core.logging import setup_logging  # noqa: E402
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(ascii.router)
     app.include_router(auth.router)
     app.include_router(chat.router)
+    app.include_router(telemt.router)
 
     return app
 

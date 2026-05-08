@@ -37,6 +37,10 @@ TELEGRAM_BOT_USERNAME: str | None = (
 # and must NOT be relied on for production. Set this in .env in production.
 WEB_SESSION_SECRET: str = os.getenv("WEB_SESSION_SECRET", "").strip()
 
+# URL of the telemt proxy Prometheus endpoint. Empty means feature disabled —
+# /telemt and /api/telemt return 503, bot /telemt replies with a hint.
+TELEMT_METRICS_URL: str = os.getenv("TELEMT_METRICS_URL", "").strip()
+
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
 

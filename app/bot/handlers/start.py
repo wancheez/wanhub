@@ -17,6 +17,7 @@ HELP_TEXT = (
     "/chat &lt;текст&gt; — то же что и префикс «Чат»\n"
     "/reset — сбросить историю чата\n"
     "/device — состояние Raspberry Pi\n"
+    "/telemt — телеметрия telemt-прокси\n"
     "/ascii — случайный ASCII-арт от Claude\n"
     "/whoami — твой chat_id"
 )

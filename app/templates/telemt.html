@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block title %}Телеметрия telemt{% endblock %}
+
+{% block content %}
+<h1>Телеметрия telemt-прокси</h1>
+
+{% if error %}
+<div class="card">
+    <p><strong>Метрики недоступны.</strong></p>
+    <p style="color:#888">{{ error }}</p>
+    <p>Проверь <code>TELEMT_METRICS_URL</code> в <code>.env</code>.</p>
+</div>
+{% else %}
+<div class="card">
+    <p><span class="label">Версия:</span> <span id="version">{{ snapshot.version or "—" }}</span></p>
+    <p><span class="label">Аптайм:</span> <span id="uptime">{{ snapshot.uptime_seconds }}</span></p>
+    <p><span class="label">Обновлено:</span> <span id="fetched">—</span></p>
+</div>
+
+<h2>Соединения</h2>
+<div class="card">
+    <p><span class="label">Принято всего:</span> <span id="conns_total">{{ snapshot.connections_total }}</span></p>
+    <p><span class="label">Отклонено:</span> <span id="conns_bad">{{ snapshot.connections_bad_total }}</span></p>
+    <p><span class="label">Handshake timeouts:</span> <span id="hs_timeouts">{{ snapshot.handshake_timeouts_total }}</span></p>
+</div>
+
+<h2>Upstream</h2>
+<div class="card">
+    <p><span class="label">Попытки:</span> <span id="up_attempt">{{ snapshot.upstream_connect_attempt_total }}</span></p>
+    <p><span class="label">Успешно:</span> <span id="up_ok">{{ snapshot.upstream_connect_success_total }}</span></p>
+    <p><span class="label">Ошибки:</span> <span id="up_fail">{{ snapshot.upstream_connect_fail_total }}</span></p>
+</div>
+
+<h2>ME-пул</h2>
+<div class="card">
+    <p><span class="label">Активные writer'ы:</span> <span id="me_active">{{ snapshot.me_writers_active }}</span> / target <span id="me_target">{{ snapshot.me_writers_target }}</span></p>
+    <p><span class="label">Warm:</span> <span id="me_warm">{{ snapshot.me_writers_warm }}</span></p>
+    <p><span class="label">Реконнекты (попыток / успех):</span> <span id="me_rc_att">{{ snapshot.me_reconnect_attempts_total }}</span> / <span id="me_rc_ok">{{ snapshot.me_reconnect_success_total }}</span></p>
+    <p><span class="label">Handshake reject:</span> <span id="me_hs_rej">{{ snapshot.me_handshake_reject_total }}</span></p>
+    <p><span class="label">Карантины (всего / неожиданные):</span> <span id="me_q">{{ snapshot.me_endpoint_quarantine_total }}</span> / <span id="me_q_unexp">{{ snapshot.me_endpoint_quarantine_unexpected_total }}</span></p>
+</div>
+
+<h2>Здоровье</h2>
+<div class="card">
+    <p><span class="label">Desync:</span> <span id="desync">{{ snapshot.desync_total }}</span></p>
+    <p><span class="label">Padding invalid:</span> <span id="pad_inv">{{ snapshot.secure_padding_invalid_total }}</span></p>
+    <p><span class="label">CRC / SEQ mismatch:</span> <span id="crc">{{ snapshot.crc_mismatch_total }}</span> / <span id="seq">{{ snapshot.seq_mismatch_total }}</span></p>
+    <p><span class="label">Route drop (no_conn / queue_full):</span> <span id="rd_nc">{{ snapshot.route_drop_no_conn_total }}</span> / <span id="rd_qf">{{ snapshot.route_drop_queue_full_total }}</span></p>
+</div>
+
+<h2>Пользователи</h2>
+<div class="card" id="users">
+    {% if snapshot.users %}
+    {% for u in snapshot.users %}
+    <div class="user-row" data-user="{{ u.user }}">
+        <p><span class="label">{{ u.user }}</span></p>
+        <p>Активные / всего: <span class="u-cur">{{ u.connections_current }}</span> / <span class="u-tot">{{ u.connections_total }}</span></p>
+        <p>Трафик ↓ / ↑: <span class="u-down">{{ u.octets_to_client }}</span> / <span class="u-up">{{ u.octets_from_client }}</span> Б</p>
+        <p>IP (текущие / окно / лимит): <span class="u-ipc">{{ u.unique_ips_current }}</span> / <span class="u-ipw">{{ u.unique_ips_recent_window }}</span> / <span class="u-ipl">{{ u.unique_ips_limit }}</span></p>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p>Активных пользователей нет.</p>
+    {% endif %}
+</div>
+
+<p class="links">
+    <a href="/">← На главную</a> &middot;
+    JSON: <a href="/api/telemt">/api/telemt</a>
+</p>
+
+<script>
+function fmtUptime(s) {
+    s = Math.floor(s);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return `${d}д ${h}ч ${m}м ${sec}с`;
+}
+
+function fmtBytes(n) {
+    if (n < 1024) return `${n} Б`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} МБ`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
+}
+
+function setText(id, v) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+}
+
+function renderUsers(users) {
+    const wrap = document.getElementById("users");
+    if (!wrap) return;
+    const have = new Set(users.map(u => u.user));
+    // remove rows for users that disappeared
+    wrap.querySelectorAll(".user-row").forEach(row => {
+        if (!have.has(row.dataset.user)) row.remove();
+    });
+    for (const u of users) {
+        let row = wrap.querySelector(`.user-row[data-user="${CSS.escape(u.user)}"]`);
+        if (!row) {
+            row = document.createElement("div");
+            row.className = "user-row";
+            row.dataset.user = u.user;
+            row.innerHTML = `
+                <p><span class="label">${u.user}</span></p>
+                <p>Активные / всего: <span class="u-cur"></span> / <span class="u-tot"></span></p>
+                <p>Трафик ↓ / ↑: <span class="u-down"></span> / <span class="u-up"></span></p>
+                <p>IP (текущие / окно / лимит): <span class="u-ipc"></span> / <span class="u-ipw"></span> / <span class="u-ipl"></span></p>
+            `;
+            wrap.appendChild(row);
+        }
+        row.querySelector(".u-cur").textContent = u.connections_current;
+        row.querySelector(".u-tot").textContent = u.connections_total;
+        row.querySelector(".u-down").textContent = fmtBytes(u.octets_to_client);
+        row.querySelector(".u-up").textContent = fmtBytes(u.octets_from_client);
+        row.querySelector(".u-ipc").textContent = u.unique_ips_current;
+        row.querySelector(".u-ipw").textContent = u.unique_ips_recent_window;
+        row.querySelector(".u-ipl").textContent = u.unique_ips_limit;
+    }
+}
+
+async function refresh() {
+    try {
+        const r = await fetch("/api/telemt");
+        if (!r.ok) return;
+        const d = await r.json();
+        setText("version", d.version || "—");
+        setText("uptime", fmtUptime(d.uptime_seconds));
+        setText("fetched", new Date(d.fetched_at_unix * 1000).toLocaleTimeString());
+        setText("conns_total", d.connections_total);
+        setText("conns_bad", d.connections_bad_total);
+        setText("hs_timeouts", d.handshake_timeouts_total);
+        setText("up_attempt", d.upstream_connect_attempt_total);
+        setText("up_ok", d.upstream_connect_success_total);
+        setText("up_fail", d.upstream_connect_fail_total);
+        setText("me_active", d.me_writers_active);
+        setText("me_target", d.me_writers_target);
+        setText("me_warm", d.me_writers_warm);
+        setText("me_rc_att", d.me_reconnect_attempts_total);
+        setText("me_rc_ok", d.me_reconnect_success_total);
+        setText("me_hs_rej", d.me_handshake_reject_total);
+        setText("me_q", d.me_endpoint_quarantine_total);
+        setText("me_q_unexp", d.me_endpoint_quarantine_unexpected_total);
+        setText("desync", d.desync_total);
+        setText("pad_inv", d.secure_padding_invalid_total);
+        setText("crc", d.crc_mismatch_total);
+        setText("seq", d.seq_mismatch_total);
+        setText("rd_nc", d.route_drop_no_conn_total);
+        setText("rd_qf", d.route_drop_queue_full_total);
+        renderUsers(d.users || []);
+    } catch (e) {}
+}
+
+(function () {
+    const u = document.getElementById("uptime");
+    if (u) u.textContent = fmtUptime(parseFloat(u.textContent));
+    {% if snapshot %}
+    document.getElementById("fetched").textContent =
+        new Date({{ snapshot.fetched_at_unix }} * 1000).toLocaleTimeString();
+    // Format pre-rendered byte fields too.
+    document.querySelectorAll(".user-row").forEach(row => {
+        const down = row.querySelector(".u-down");
+        const up = row.querySelector(".u-up");
+        if (down) down.textContent = fmtBytes(parseInt(down.textContent, 10));
+        if (up) up.textContent = fmtBytes(parseInt(up.textContent, 10));
+    });
+    setInterval(refresh, 5000);
+    {% endif %}
+})();
+</script>
+{% endif %}
+{% endblock %}
