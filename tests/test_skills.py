@@ -1,4 +1,5 @@
 from app.bot.skills.send_image import SendImageSkill
+from app.bot.skills.start_game import StartGameSkill, extract_game_intent
 
 
 def test_match_basic():
@@ -82,3 +83,95 @@ def test_no_match_empty_subject():
     s = SendImageSkill()
     # "пришли фото" — no subject after.
     assert s.match("пришли фото") is None
+
+
+# ----- StartGameSkill -----
+
+
+def test_game_match_quiz_with_verb():
+    assert extract_game_intent("запусти квиз") == {"game": "quiz", "num": None}
+
+
+def test_game_match_flags_with_play_phrase():
+    assert extract_game_intent("давай сыграем в флаги") == {"game": "flags", "num": None}
+
+
+def test_game_match_capitals_with_poigraem():
+    assert extract_game_intent("поиграем в столицы") == {"game": "capitals", "num": None}
+
+
+def test_game_match_bare_quiz():
+    assert extract_game_intent("квиз") == {"game": "quiz", "num": None}
+
+
+def test_game_match_bare_flags():
+    assert extract_game_intent("флаги") == {"game": "flags", "num": None}
+
+
+def test_game_match_bare_capitals():
+    assert extract_game_intent("столицы") == {"game": "capitals", "num": None}
+
+
+def test_game_match_with_num():
+    assert extract_game_intent("запусти квиз на 10") == {"game": "quiz", "num": 10}
+
+
+def test_game_match_num_without_na():
+    assert extract_game_intent("флаги 7") == {"game": "flags", "num": 7}
+
+
+def test_game_match_num_with_word_voprosov():
+    assert extract_game_intent("сыграем в столицы на 5 вопросов") == {
+        "game": "capitals",
+        "num": 5,
+    }
+
+
+def test_game_match_capitalized():
+    assert extract_game_intent("Запусти Квиз") == {"game": "quiz", "num": None}
+
+
+def test_game_match_inflection():
+    # «викторину» / «столицу» — другие падежи
+    assert extract_game_intent("давай викторину") == {"game": "quiz", "num": None}
+    assert extract_game_intent("запусти столицу") == {"game": "capitals", "num": None}
+
+
+def test_game_match_trailing_punct():
+    assert extract_game_intent("запусти квиз!") == {"game": "quiz", "num": None}
+
+
+def test_game_num_out_of_range_falls_back_to_default():
+    # 999 > MAX_QUIZ_QUESTIONS — num схлопывается в None, игра пойдёт с дефолтом.
+    assert extract_game_intent("запусти квиз на 999") == {"game": "quiz", "num": None}
+
+
+def test_game_num_zero_falls_back_to_default():
+    assert extract_game_intent("флаги 0") == {"game": "flags", "num": None}
+
+
+def test_game_no_match_general_question():
+    assert extract_game_intent("расскажи про квизы") is None
+
+
+def test_game_no_match_unrelated_verb():
+    # «покажи квиз» — это запрос показать что-то, не запустить игру.
+    assert extract_game_intent("покажи квиз") is None
+
+
+def test_game_no_match_chat_about_games():
+    assert extract_game_intent("какие бывают игры") is None
+
+
+def test_game_no_match_greeting():
+    assert extract_game_intent("привет") is None
+
+
+def test_game_skill_match_returns_dict():
+    s = StartGameSkill()
+    assert s.match("запусти квиз") == {"game": "quiz", "num": None}
+
+
+def test_game_skill_no_match_returns_none():
+    s = StartGameSkill()
+    assert s.match("привет, как дела") is None

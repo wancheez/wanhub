@@ -4,7 +4,7 @@
 который в финале зовёт `_send_question` отсюда.
 
 Состояние игры — в памяти процесса (`app.services.games`). Одна игра на чат.
-Каждый игрок отвечает на вопрос один раз; «Далее →» нажимает кто угодно.
+Каждый игрок отвечает на вопрос один раз; «⏭ Далее» нажимает кто угодно.
 """
 
 import logging
@@ -236,9 +236,13 @@ def _question_keyboard(game: games.Game) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for i, label in enumerate(q.options):
         builder.button(text=label, callback_data=f"{CB_ANSWER}{game.current_idx}:{i}")
-    builder.adjust(2)
-    builder.row(InlineKeyboardButton(text="Далее →", callback_data=f"{CB_NEXT}{game.current_idx}"))
-    builder.row(InlineKeyboardButton(text="🛑 Остановить", callback_data=CB_STOP))
+    # 1 кнопка в ряд — варианты ответов в trivia бывают длинные и не влезают
+    # в две колонки (Telegram режет/переносит — выглядит криво).
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⏭ Далее", callback_data=f"{CB_NEXT}{game.current_idx}"),
+        InlineKeyboardButton(text="🛑 Остановить", callback_data=CB_STOP),
+    )
     return builder.as_markup()
 
 
