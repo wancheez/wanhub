@@ -41,6 +41,9 @@ WEB_SESSION_SECRET: str = os.getenv("WEB_SESSION_SECRET", "").strip()
 # /telemt and /api/telemt return 503, bot /telemt replies with a hint.
 TELEMT_METRICS_URL: str = os.getenv("TELEMT_METRICS_URL", "").strip()
 
+DEFAULT_QUIZ_QUESTIONS = 5
+MAX_QUIZ_QUESTIONS = 30
+
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
 

@@ -31,13 +31,31 @@ class ChatWhitelistMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        # Inline buttons live in the admin's DM and only the admin should be
-        # able to press them. CallbackQuery has no top-level `chat` attribute
-        # (it's nested in `event.message.chat`), so gate by from_user.id.
+        # CallbackQuery has no top-level `chat` — pull it from the attached
+        # message and gate by the same chat-whitelist rules as messages, so
+        # any approved-chat user can press game buttons. Admin-only callbacks
+        # (approve/deny in admin's DM) are additionally guarded inside their
+        # own handlers.
         if isinstance(event, CallbackQuery):
+            msg = event.message
+            if isinstance(msg, Message):
+                cb_chat_id = msg.chat.id
+                if self.admin_id is not None and cb_chat_id == self.admin_id:
+                    return await handler(event, data)
+                if self.admin_id is not None and event.from_user.id == self.admin_id:
+                    return await handler(event, data)
+                if chat_whitelist.get_status(cb_chat_id) == "approved":
+                    return await handler(event, data)
+                log.info(
+                    "blocked callback chat_id=%s user_id=%s",
+                    cb_chat_id,
+                    event.from_user.id,
+                )
+                return None
+            # No attached message (legacy inline_message_id) — admin only.
             if self.admin_id is not None and event.from_user.id == self.admin_id:
                 return await handler(event, data)
-            log.info("blocked callback from non-admin user_id=%s", event.from_user.id)
+            log.info("blocked callback w/o chat from user_id=%s", event.from_user.id)
             return None
 
         chat: Chat | None = getattr(event, "chat", None)
