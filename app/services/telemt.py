@@ -86,7 +86,9 @@ def _users(metrics: ParsedMetrics) -> list[TelemtUser]:
         (
             TelemtUser(
                 user=u,
-                connections_current=int(_user_metric(metrics, "telemt_user_connections_current", u)),
+                connections_current=int(
+                    _user_metric(metrics, "telemt_user_connections_current", u)
+                ),
                 connections_total=int(_user_metric(metrics, "telemt_user_connections_total", u)),
                 octets_from_client=int(_user_metric(metrics, "telemt_user_octets_from_client", u)),
                 octets_to_client=int(_user_metric(metrics, "telemt_user_octets_to_client", u)),
