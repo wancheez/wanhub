@@ -1,0 +1,92 @@
+# HELP telemt_build_info Build info
+# TYPE telemt_build_info gauge
+telemt_build_info{version="3.4.10",commit="deadbeef"} 1
+# HELP telemt_uptime_seconds Process uptime in seconds
+# TYPE telemt_uptime_seconds counter
+telemt_uptime_seconds 562.1
+# HELP telemt_connections_total Total client connections accepted
+# TYPE telemt_connections_total counter
+telemt_connections_total 640
+# HELP telemt_connections_bad_total Connections rejected as malformed
+# TYPE telemt_connections_bad_total counter
+telemt_connections_bad_total 4
+# HELP telemt_handshake_timeouts_total Client handshake timeouts
+# TYPE telemt_handshake_timeouts_total counter
+telemt_handshake_timeouts_total 1
+# HELP telemt_upstream_connect_attempt_total Upstream dial attempts
+# TYPE telemt_upstream_connect_attempt_total counter
+telemt_upstream_connect_attempt_total 472
+# HELP telemt_upstream_connect_success_total Upstream dials that succeeded
+# TYPE telemt_upstream_connect_success_total counter
+telemt_upstream_connect_success_total 470
+# HELP telemt_upstream_connect_fail_total Upstream dials that failed
+# TYPE telemt_upstream_connect_fail_total counter
+telemt_upstream_connect_fail_total 2
+# HELP telemt_me_writers_active_current Active middleware writers
+# TYPE telemt_me_writers_active_current gauge
+telemt_me_writers_active_current 44
+# HELP telemt_me_writers_warm_current Warm middleware writers
+# TYPE telemt_me_writers_warm_current gauge
+telemt_me_writers_warm_current 6
+# HELP telemt_me_adaptive_floor_target_writers_total Target writer floor
+# TYPE telemt_me_adaptive_floor_target_writers_total gauge
+telemt_me_adaptive_floor_target_writers_total 43
+# HELP telemt_me_reconnect_attempts_total Middleware reconnect attempts
+# TYPE telemt_me_reconnect_attempts_total counter
+telemt_me_reconnect_attempts_total 9
+# HELP telemt_me_reconnect_success_total Middleware reconnect successes
+# TYPE telemt_me_reconnect_success_total counter
+telemt_me_reconnect_success_total 8
+# HELP telemt_me_handshake_reject_total Middleware handshake rejections
+# TYPE telemt_me_handshake_reject_total counter
+telemt_me_handshake_reject_total 0
+# HELP telemt_me_endpoint_quarantine_total Endpoint quarantine events
+# TYPE telemt_me_endpoint_quarantine_total counter
+telemt_me_endpoint_quarantine_total 7
+# HELP telemt_me_endpoint_quarantine_unexpected_total Unexpected quarantines
+# TYPE telemt_me_endpoint_quarantine_unexpected_total counter
+telemt_me_endpoint_quarantine_unexpected_total 5
+# HELP telemt_desync_total Desync events
+# TYPE telemt_desync_total counter
+telemt_desync_total 0
+# HELP telemt_secure_padding_invalid_total Invalid padding events
+# TYPE telemt_secure_padding_invalid_total counter
+telemt_secure_padding_invalid_total 0
+# HELP telemt_me_crc_mismatch_total CRC mismatches
+# TYPE telemt_me_crc_mismatch_total counter
+telemt_me_crc_mismatch_total 0
+# HELP telemt_me_seq_mismatch_total Sequence number mismatches
+# TYPE telemt_me_seq_mismatch_total counter
+telemt_me_seq_mismatch_total 0
+# HELP telemt_me_route_drop_no_conn_total Drops because target had no connection
+# TYPE telemt_me_route_drop_no_conn_total counter
+telemt_me_route_drop_no_conn_total 40
+# HELP telemt_me_route_drop_queue_full_total Drops because the queue was full
+# TYPE telemt_me_route_drop_queue_full_total counter
+telemt_me_route_drop_queue_full_total 0
+# HELP telemt_buffer_pool_buffers_total Pooled buffer accounting
+# TYPE telemt_buffer_pool_buffers_total gauge
+telemt_buffer_pool_buffers_total{kind="pooled"} 11
+telemt_buffer_pool_buffers_total{kind="allocated"} 11
+telemt_buffer_pool_buffers_total{kind="in_use"} 0
+# HELP telemt_user_connections_current Per-user current connections
+# TYPE telemt_user_connections_current gauge
+telemt_user_connections_current{user="hello"} 11
+# HELP telemt_user_connections_total Per-user lifetime connections
+# TYPE telemt_user_connections_total counter
+telemt_user_connections_total{user="hello"} 636
+# HELP telemt_user_octets_from_client Per-user bytes received from client
+# TYPE telemt_user_octets_from_client counter
+telemt_user_octets_from_client{user="hello"} 789500
+# HELP telemt_user_octets_to_client Per-user bytes sent to client
+# TYPE telemt_user_octets_to_client counter
+telemt_user_octets_to_client{user="hello"} 13214792
+# HELP telemt_user_unique_ips_current Per-user unique source IPs (live)
+# TYPE telemt_user_unique_ips_current gauge
+telemt_user_unique_ips_current{user="hello"} 3
+# HELP telemt_user_unique_ips_recent_window Per-user unique source IPs (recent window)
+# TYPE telemt_user_unique_ips_recent_window gauge
+telemt_user_unique_ips_recent_window{user="hello"} 2
+# HELP telemt_user_unique_ips_limit Per-user unique source IPs limit
+# TYPE telemt_user_unique_ips_limit gauge
+telemt_user_unique_ips_limit{user="hello"} 0

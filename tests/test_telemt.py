@@ -7,7 +7,7 @@ from app.api.auth import require_user_api
 from app.main import app
 from app.services.telemt import TelemtUnavailable, build_snapshot, parse_metrics
 
-FIXTURE = Path(__file__).resolve().parents[1] / "telemt.metrics.example"
+FIXTURE = Path(__file__).resolve().parent / "telemt.metrics.example"
 client = TestClient(app)
 
 _FAKE_USER = {"id": 1, "username": "test", "status": "approved"}
