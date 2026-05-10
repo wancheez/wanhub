@@ -1,7 +1,9 @@
 """In-memory state и логика игровых сессий.
 
-Поддерживаются две викторины: по флагам (kind=FLAG) и по столицам (kind=CAPITAL).
-Структура состояния общая — отличается только способ показа в боте.
+Поддерживаются три викторины: по флагам (FLAG), по столицам (CAPITAL) и
+общеобразовательная Open Trivia DB (TRIVIA). `Question` хранит уже
+отрендеренные строки + опциональный URL картинки — рантайм бота не знает
+о Country, Brand или trivia, он просто рисует то что лежит в `Question`.
 
 Одна активная игра на чат. Состояние живёт в памяти процесса; рестарт
 прибивает все идущие игры.
@@ -9,26 +11,71 @@
 
 import logging
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from html import escape
 
 from app.services.countries import Country, get_countries
+from app.services.trivia import (
+    RawTrivia,
+    TranslatedTrivia,
+    TranslationFailed,
+    TriviaUnavailable,  # re-exported для удобства хендлера
+    fetch_trivia,
+    translate,
+)
 
 log = logging.getLogger("app")
+
+__all__ = [
+    "AdvanceResult",
+    "Country",
+    "Game",
+    "GameAlreadyRunning",
+    "GameKind",
+    "NotEnoughItems",
+    "Question",
+    "SubmitResult",
+    "TriviaUnavailable",
+    "advance",
+    "answered_names",
+    "cancel_game",
+    "compute_scores",
+    "format_scoreboard",
+    "get_game",
+    "reset_state",
+    "start_capital_game",
+    "start_flag_game",
+    "start_trivia_game",
+    "submit_answer",
+]
 
 
 class GameKind(Enum):
     FLAG = "flag"
     CAPITAL = "capital"
+    TRIVIA = "trivia"
 
 
 @dataclass(frozen=True)
 class Question:
-    correct: Country
-    options: tuple[Country, Country, Country, Country]
+    """Display-agnostic вопрос: всё уже отрендерено и HTML-эскейплено где нужно.
+
+    `prompt` может содержать ограниченный HTML (<b>/<i>) — он подаётся в
+    Telegram с parse_mode=HTML.
+    `options` — лейблы кнопок, escape сделан на этапе сборки.
+    `image_url` задан — вопрос показывается как фото с caption=prompt;
+    None — обычным сообщением.
+    `category` — необязательная подпись над промптом (для trivia).
+    """
+
+    prompt: str
+    options: tuple[str, str, str, str]
     correct_idx: int
+    image_url: str | None = None
+    category: str | None = None
 
 
 @dataclass
@@ -77,8 +124,8 @@ class GameAlreadyRunning(Exception):
     pass
 
 
-class NotEnoughCountries(Exception):
-    pass
+class NotEnoughItems(Exception):
+    """Источник вернул меньше 4 элементов — вопрос не собрать."""
 
 
 _games: dict[int, Game] = {}
@@ -89,30 +136,54 @@ def get_game(chat_id: int) -> Game | None:
 
 
 async def start_flag_game(chat_id: int, num_questions: int, starter_id: int) -> Game:
-    """Игра «угадай страну по флагу». Использует все доступные страны."""
+    """Игра «угадай страну по флагу»."""
     countries = await get_countries()
-    return _start(chat_id, num_questions, starter_id, GameKind.FLAG, countries)
+    if len(countries) < 4:
+        raise NotEnoughItems()
+    questions = _build_country_questions(countries, num_questions, GameKind.FLAG)
+    return _register(chat_id, GameKind.FLAG, starter_id, questions)
 
 
 async def start_capital_game(chat_id: int, num_questions: int, starter_id: int) -> Game:
     """Игра «угадай столицу страны». Только страны с capital_ru."""
     countries = [c for c in await get_countries() if c.capital_ru]
-    return _start(chat_id, num_questions, starter_id, GameKind.CAPITAL, countries)
+    if len(countries) < 4:
+        raise NotEnoughItems()
+    questions = _build_country_questions(countries, num_questions, GameKind.CAPITAL)
+    return _register(chat_id, GameKind.CAPITAL, starter_id, questions)
 
 
-def _start(
+async def start_trivia_game(
     chat_id: int,
     num_questions: int,
     starter_id: int,
-    kind: GameKind,
-    pool: list[Country],
+    *,
+    category: int | None = None,
+    difficulty: str | None = None,
 ) -> Game:
+    """Игра «общая трivia из Open Trivia DB» с переводом на русский.
+
+    При сбое перевода молча падаем на английский — лучше показать игру
+    на исходном языке, чем уронить весь /quiz. Сетевые ошибки опентdb
+    пробрасываем (TriviaUnavailable) — это уже неустранимо для игрока.
+    """
     if chat_id in _games:
         raise GameAlreadyRunning()
-    if len(pool) < 4:
-        raise NotEnoughCountries()
+    raw = await fetch_trivia(num_questions, category=category, difficulty=difficulty)
+    if len(raw) < num_questions:
+        raise NotEnoughItems()
+    try:
+        translated = await translate(raw)
+    except TranslationFailed as e:
+        log.warning("trivia: translation failed, falling back to EN: %s", e)
+        translated = [_raw_as_translated(r) for r in raw]
+    questions = _build_trivia_questions(translated)
+    return _register(chat_id, GameKind.TRIVIA, starter_id, questions)
 
-    questions = _build_questions(pool, num_questions)
+
+def _register(chat_id: int, kind: GameKind, starter_id: int, questions: list[Question]) -> Game:
+    if chat_id in _games:
+        raise GameAlreadyRunning()
     game = Game(
         chat_id=chat_id,
         kind=kind,
@@ -202,32 +273,90 @@ def format_scoreboard(game: Game) -> str:
     return "\n".join(lines)
 
 
-def _build_questions(countries: list[Country], num: int) -> list[Question]:
-    """Собрать N вопросов: правильные страны без повторов, дистракторы по
-    возможности из того же региона.
-    """
-    correct_picks = random.sample(countries, num)
-    by_region: dict[str, list[Country]] = {}
-    for c in countries:
-        by_region.setdefault(c.region, []).append(c)
+def _pick_distractors[T](
+    correct: T,
+    pool: list[T],
+    *,
+    key: Callable[[T], str],
+    group: Callable[[T], str],
+) -> list[T]:
+    """Подобрать 3 distractor'а: сначала из той же группы, иначе из любых.
 
+    Pool должен содержать минимум 4 элемента (включая correct), иначе
+    `random.sample` бросит ValueError — это лучше тихого фолбэка.
+    """
+    correct_key = key(correct)
+    same_group = [c for c in pool if group(c) == group(correct) and key(c) != correct_key]
+    if len(same_group) >= 3:
+        return random.sample(same_group, 3)
+    others = [c for c in pool if key(c) != correct_key]
+    return random.sample(others, 3)
+
+
+def _build_country_questions(countries: list[Country], num: int, kind: GameKind) -> list[Question]:
+    """Собрать N вопросов по странам — рендерим строки уже здесь."""
+    correct_picks = random.sample(countries, num)
     out: list[Question] = []
     for correct in correct_picks:
-        same_region = [c for c in by_region.get(correct.region, []) if c.cca2 != correct.cca2]
-        if len(same_region) >= 3:
-            distractors = random.sample(same_region, 3)
-        else:
-            others = [c for c in countries if c.cca2 != correct.cca2]
-            distractors = random.sample(others, 3)
-
+        distractors = _pick_distractors(
+            correct, countries, key=lambda c: c.cca2, group=lambda c: c.region
+        )
         opts = [correct, *distractors]
         random.shuffle(opts)
         correct_idx = opts.index(correct)
+        out.append(_country_question(kind, correct, opts, correct_idx))
+    return out
+
+
+def _country_question(
+    kind: GameKind, correct: Country, opts: list[Country], correct_idx: int
+) -> Question:
+    if kind is GameKind.FLAG:
+        return Question(
+            prompt="Что это за страна?",
+            options=tuple(escape(c.name_ru) for c in opts),  # type: ignore[arg-type]
+            correct_idx=correct_idx,
+            image_url=correct.flag_url,
+        )
+    # CAPITAL
+    return Question(
+        prompt=f"Какая столица: <b>{escape(correct.name_ru)}</b>?",
+        options=tuple(escape(c.capital_ru or c.name_ru) for c in opts),  # type: ignore[arg-type]
+        correct_idx=correct_idx,
+    )
+
+
+def _raw_as_translated(r: RawTrivia) -> TranslatedTrivia:
+    """Обернуть нетранслированный вопрос в TranslatedTrivia (EN-fallback)."""
+    incorrect = r.incorrect_answers
+    if len(incorrect) != 3:
+        # opentdb не должен такого присылать на type=multiple, но защитимся.
+        incorrect = [*incorrect, "", "", ""][:3]
+    return TranslatedTrivia(
+        category=r.category,
+        question=r.question,
+        options=(r.correct_answer, incorrect[0], incorrect[1], incorrect[2]),
+    )
+
+
+def _build_trivia_questions(items: list[TranslatedTrivia]) -> list[Question]:
+    """Перемешать варианты trivia-вопросов и обернуть в Question.
+
+    `TranslatedTrivia.options[0]` — правильный ответ (контракт сервиса
+    перевода). Здесь шаффлим и фиксируем новый correct_idx.
+    """
+    out: list[Question] = []
+    for item in items:
+        opts = list(item.options)
+        correct_text = opts[0]
+        random.shuffle(opts)
+        correct_idx = opts.index(correct_text)
         out.append(
             Question(
-                correct=correct,
-                options=(opts[0], opts[1], opts[2], opts[3]),
+                prompt=escape(item.question),
+                options=tuple(escape(o) for o in opts),  # type: ignore[arg-type]
                 correct_idx=correct_idx,
+                category=item.category,
             )
         )
     return out

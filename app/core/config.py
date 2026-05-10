@@ -44,6 +44,13 @@ TELEMT_METRICS_URL: str = os.getenv("TELEMT_METRICS_URL", "").strip()
 DEFAULT_QUIZ_QUESTIONS = 5
 MAX_QUIZ_QUESTIONS = 30
 
+# Open Trivia DB (https://opentdb.com) — публичный, без ключа.
+TRIVIA_API_URL: str = os.getenv("TRIVIA_API_URL", "https://opentdb.com").rstrip("/")
+TRIVIA_TIMEOUT_S: float = 6.0
+# Потолок для /quiz: opentdb сам поддерживает до 50, но 20 — разумный
+# предел для одного батч-перевода через Claude и компактного wizard'а.
+TRIVIA_MAX_QUESTIONS: int = 20
+
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
 

@@ -40,6 +40,9 @@ FAKE_COUNTRIES = [
     _country("MY", "Малайзия", "Asia", "Куала-Лумпур"),
 ]
 
+EUROPE_NAMES = {c.name_ru for c in FAKE_COUNTRIES if c.region == "Europe"}
+ASIA_NAMES = {c.name_ru for c in FAKE_COUNTRIES if c.region == "Asia"}
+
 
 @pytest.fixture(autouse=True)
 def isolated_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,19 +70,35 @@ def test_start_creates_n_questions() -> None:
     assert all(a == {} for a in game.answers)
 
 
-def test_question_has_4_unique_options_with_correct() -> None:
+def test_question_has_4_unique_options() -> None:
     game = _start(chat_id=1, n=5)
     for q in game.questions:
         assert len(q.options) == 4
-        cca2s = {o.cca2 for o in q.options}
-        assert len(cca2s) == 4
-        assert q.options[q.correct_idx].cca2 == q.correct.cca2
+        assert len(set(q.options)) == 4
+        # correct_idx указывает на валидный индекс
+        assert 0 <= q.correct_idx < 4
 
 
 def test_correct_questions_have_no_duplicates() -> None:
+    """Правильные ответы (название страны на кнопке) не повторяются."""
     game = _start(chat_id=1, n=10)
-    correct_codes = [q.correct.cca2 for q in game.questions]
-    assert len(set(correct_codes)) == len(correct_codes)
+    correct_labels = [q.options[q.correct_idx] for q in game.questions]
+    assert len(set(correct_labels)) == len(correct_labels)
+
+
+def test_flag_question_has_image_url() -> None:
+    game = _start(chat_id=1, n=3)
+    for q in game.questions:
+        assert q.image_url is not None
+        assert q.image_url.startswith("https://flagcdn.com/")
+        assert q.prompt == "Что это за страна?"
+
+
+def test_capital_question_no_image_and_prompt_has_country() -> None:
+    game = asyncio.run(games.start_capital_game(chat_id=1, num_questions=3, starter_id=1))
+    for q in game.questions:
+        assert q.image_url is None
+        assert q.prompt.startswith("Какая столица:")
 
 
 def test_submit_correct_increments_score() -> None:
@@ -227,8 +246,6 @@ def test_start_capital_game_kind() -> None:
     assert game.kind is games.GameKind.CAPITAL
     assert game.starter_id == 42
     assert game.total == 3
-    for q in game.questions:
-        assert q.correct.capital_ru is not None
 
 
 def test_capital_game_skips_countries_without_capital(
@@ -247,17 +264,60 @@ def test_capital_game_skips_countries_without_capital(
 
     monkeypatch.setattr(games, "get_countries", fake)
     games.reset_state()
-    with pytest.raises(games.NotEnoughCountries):
+    with pytest.raises(games.NotEnoughItems):
         asyncio.run(games.start_capital_game(chat_id=2, num_questions=3, starter_id=1))
 
 
-def test_capital_game_options_all_have_capitals() -> None:
+def test_capital_game_option_labels_are_capitals() -> None:
+    """В capital-игре все варианты — это столицы из FAKE_COUNTRIES."""
     game = asyncio.run(games.start_capital_game(chat_id=1, num_questions=5, starter_id=1))
+    valid_capitals = {c.capital_ru for c in FAKE_COUNTRIES if c.capital_ru}
     for q in game.questions:
-        for opt in q.options:
-            assert opt.capital_ru is not None
+        for label in q.options:
+            assert label in valid_capitals
 
 
 def test_starter_id_stored_on_game() -> None:
     game = _start(chat_id=1, n=3, starter_id=777)
     assert game.starter_id == 777
+
+
+def test_pick_distractors_prefers_same_group() -> None:
+    """Когда в группе ≥3 элементов кроме correct, дистракторы все из неё."""
+    from app.services.games import _pick_distractors
+
+    correct = FAKE_COUNTRIES[0]  # RU, Europe
+    for _ in range(20):  # многократный прогон, чтобы поймать рандомность
+        distractors = _pick_distractors(
+            correct, FAKE_COUNTRIES, key=lambda c: c.cca2, group=lambda c: c.region
+        )
+        assert len(distractors) == 3
+        assert all(d.region == "Europe" for d in distractors)
+        assert all(d.cca2 != correct.cca2 for d in distractors)
+
+
+def test_pick_distractors_falls_back_to_other_groups() -> None:
+    """Когда в группе <3 кандидатов — допускаем элементы из других групп."""
+    from app.services.games import _pick_distractors
+
+    pool = [
+        _country("RU", "Россия", "Europe"),
+        _country("JP", "Япония", "Asia"),
+        _country("CN", "Китай", "Asia"),
+        _country("KR", "Корея", "Asia"),
+        _country("IN", "Индия", "Asia"),
+    ]
+    correct = pool[0]  # RU — единственная Europe
+    distractors = _pick_distractors(correct, pool, key=lambda c: c.cca2, group=lambda c: c.region)
+    assert len(distractors) == 3
+    assert all(d.cca2 != correct.cca2 for d in distractors)
+
+
+def test_flag_game_too_few_countries_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def tiny() -> list[Country]:
+        return [_country("RU", "Россия")]
+
+    monkeypatch.setattr(games, "get_countries", tiny)
+    games.reset_state()
+    with pytest.raises(games.NotEnoughItems):
+        asyncio.run(games.start_flag_game(chat_id=2, num_questions=1, starter_id=1))

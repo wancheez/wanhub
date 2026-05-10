@@ -1,4 +1,7 @@
-"""Команды игр: /flags — викторина по флагам, /capitals — по столицам.
+"""Команды игр: /flags — флаги, /capitals — столицы, /quiz — Open Trivia DB.
+
+Команда /quiz запускается через wizard в `app/bot/handlers/trivia.py`,
+который в финале зовёт `_send_question` отсюда.
 
 Состояние игры — в памяти процесса (`app.services.games`). Одна игра на чат.
 Каждый игрок отвечает на вопрос один раз; «Далее →» нажимает кто угодно.
@@ -29,15 +32,21 @@ CB_ANSWER = "flg:a:"
 CB_NEXT = "flg:n:"
 CB_STOP = "flg:s"
 
+_CMD_NAMES: dict[games.GameKind, str] = {
+    games.GameKind.FLAG: "/flags",
+    games.GameKind.CAPITAL: "/capitals",
+    games.GameKind.TRIVIA: "/quiz",
+}
+
 
 @router.message(Command("flags"))
 async def cmd_flags(message: Message, command: CommandObject) -> None:
-    await _start_game(message, command, games.GameKind.FLAG)
+    await _start_country_game(message, command, games.GameKind.FLAG)
 
 
 @router.message(Command("capitals"))
 async def cmd_capitals(message: Message, command: CommandObject) -> None:
-    await _start_game(message, command, games.GameKind.CAPITAL)
+    await _start_country_game(message, command, games.GameKind.CAPITAL)
 
 
 @router.message(Command("flagscancel"))
@@ -54,9 +63,11 @@ async def cmd_flagscancel(message: Message) -> None:
     await message.answer("Игра отменена.")
 
 
-async def _start_game(message: Message, command: CommandObject, kind: games.GameKind) -> None:
+async def _start_country_game(
+    message: Message, command: CommandObject, kind: games.GameKind
+) -> None:
     chat_id = message.chat.id
-    cmd_name = "/flags" if kind is games.GameKind.FLAG else "/capitals"
+    cmd_name = _CMD_NAMES[kind]
     num = _parse_num_arg(command.args)
     if num is None:
         await message.answer(
@@ -75,7 +86,7 @@ async def _start_game(message: Message, command: CommandObject, kind: games.Game
     except games.GameAlreadyRunning:
         await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
         return
-    except games.NotEnoughCountries:
+    except games.NotEnoughItems:
         await message.answer("⚠️ База стран пуста. Попробуй позже.")
         return
     except RuntimeError:
@@ -219,39 +230,30 @@ def _parse_round_payload(data: str, prefix: str, expected_parts: int) -> tuple[i
         return None
 
 
-def _option_label(game: games.Game, country: games.Country) -> str:
-    """Подпись на кнопке варианта: страна (FLAG) или столица (CAPITAL)."""
-    if game.kind is games.GameKind.FLAG:
-        return country.name_ru
-    return country.capital_ru or country.name_ru
-
-
 def _question_keyboard(game: games.Game) -> InlineKeyboardMarkup:
     q = game.current_question()
     assert q is not None
     builder = InlineKeyboardBuilder()
-    for i, opt in enumerate(q.options):
-        builder.button(
-            text=_option_label(game, opt),
-            callback_data=f"{CB_ANSWER}{game.current_idx}:{i}",
-        )
+    for i, label in enumerate(q.options):
+        builder.button(text=label, callback_data=f"{CB_ANSWER}{game.current_idx}:{i}")
     builder.adjust(2)
     builder.row(InlineKeyboardButton(text="Далее →", callback_data=f"{CB_NEXT}{game.current_idx}"))
     builder.row(InlineKeyboardButton(text="🛑 Остановить", callback_data=CB_STOP))
     return builder.as_markup()
 
 
+def _question_header(game: games.Game, q: games.Question) -> str:
+    """Шапка вопроса: «Вопрос N/M», иногда + категория."""
+    parts = [f"<b>Вопрос {game.current_idx + 1}/{game.total}</b>"]
+    if q.category:
+        parts.append(f"<i>Категория: {escape(q.category)}</i>")
+    return "\n".join(parts)
+
+
 def _question_text(game: games.Game, answered: list[str] | None = None) -> str:
-    qno = game.current_idx + 1
     q = game.current_question()
     assert q is not None
-
-    if game.kind is games.GameKind.FLAG:
-        prompt = "Что это за страна?"
-    else:
-        prompt = f"Какая столица: <b>{escape(q.correct.name_ru)}</b>?"
-
-    parts = [f"<b>Вопрос {qno}/{game.total}</b>", prompt]
+    parts = [_question_header(game, q), q.prompt]
     if answered:
         names = ", ".join(escape(n) for n in answered)
         parts.append(f"\nОтветили: {names}")
@@ -267,10 +269,10 @@ async def _send_question(message: Message, game: games.Game) -> None:
 
     text = _question_text(game)
     kb = _question_keyboard(game)
-    if game.kind is games.GameKind.FLAG:
+    if q.image_url is not None:
         await bot.send_photo(
             chat_id=message.chat.id,
-            photo=q.correct.flag_url,
+            photo=q.image_url,
             caption=text,
             parse_mode="HTML",
             reply_markup=kb,
@@ -290,8 +292,10 @@ async def _refresh_question_caption(cb: CallbackQuery, game: games.Game, q_idx: 
     answered = games.answered_names(game, q_idx)
     text = _question_text(game, answered)
     kb = _question_keyboard(game)
+    q = game.current_question()
+    assert q is not None
     with suppress(TelegramBadRequest):
-        if game.kind is games.GameKind.FLAG:
+        if q.image_url is not None:
             await cb.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=kb)
         else:
             await cb.message.edit_text(text=text, parse_mode="HTML", reply_markup=kb)
@@ -306,31 +310,26 @@ async def _finalize_round_caption(cb: CallbackQuery, game: games.Game, q_idx: in
     q = game.questions[q_idx]
     answers = game.answers[q_idx]
 
-    if game.kind is games.GameKind.FLAG:
-        prompt = "Что это за страна?"
-        correct_label = q.options[q.correct_idx].name_ru
-    else:
-        prompt = f"Какая столица: <b>{escape(q.correct.name_ru)}</b>?"
-        correct_label = q.options[q.correct_idx].capital_ru or q.options[q.correct_idx].name_ru
-
+    header_parts = [f"<b>Вопрос {q_idx + 1}/{game.total}</b>"]
+    if q.category:
+        header_parts.append(f"<i>Категория: {escape(q.category)}</i>")
     lines = [
-        f"<b>Вопрос {q_idx + 1}/{game.total}</b>",
-        prompt,
-        f"Правильный ответ: <b>{escape(correct_label)}</b>",
+        *header_parts,
+        q.prompt,
+        f"Правильный ответ: <b>{q.options[q.correct_idx]}</b>",
     ]
     if answers:
         lines.append("")
         for user_id, choice in answers.items():
             name = game.players.get(user_id, "?")
             mark = "✅" if choice == q.correct_idx else "❌"
-            chosen = _option_label(game, q.options[choice])
-            lines.append(f"{mark} {escape(name)} → {escape(chosen)}")
+            lines.append(f"{mark} {escape(name)} → {q.options[choice]}")
     else:
         lines.append("\n<i>Никто не ответил</i>")
 
     text = "\n".join(lines)
     with suppress(TelegramBadRequest):
-        if game.kind is games.GameKind.FLAG:
+        if q.image_url is not None:
             await cb.message.edit_caption(caption=text, parse_mode="HTML")
         else:
             await cb.message.edit_text(text=text, parse_mode="HTML")
