@@ -155,11 +155,11 @@ def advance(chat_id: int, q_idx: int) -> AdvanceResult:
     game = _games.get(chat_id)
     if game is None:
         return AdvanceResult.NO_GAME
-    if q_idx != game.current_idx or game.is_finished:
+    if q_idx != game.current_idx or game.current_idx >= game.total:
         return AdvanceResult.STALE
 
     game.current_idx += 1
-    if game.is_finished:
+    if game.current_idx >= game.total:
         return AdvanceResult.FINISHED
     return AdvanceResult.NEXT
 

@@ -144,7 +144,7 @@ async def on_stop(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith(CB_NEXT))
 async def on_next(cb: CallbackQuery) -> None:
-    if cb.message is None or cb.data is None:
+    if not isinstance(cb.message, Message) or cb.data is None:
         await cb.answer()
         return
 
@@ -285,7 +285,7 @@ async def _send_question(message: Message, game: games.Game) -> None:
 
 
 async def _refresh_question_caption(cb: CallbackQuery, game: games.Game, q_idx: int) -> None:
-    if cb.message is None or q_idx != game.current_idx:
+    if not isinstance(cb.message, Message) or q_idx != game.current_idx:
         return
     answered = games.answered_names(game, q_idx)
     text = _question_text(game, answered)
@@ -299,7 +299,7 @@ async def _refresh_question_caption(cb: CallbackQuery, game: games.Game, q_idx: 
 
 async def _finalize_round_caption(cb: CallbackQuery, game: games.Game, q_idx: int) -> None:
     """Обновить сообщение завершённого раунда: правильный ответ + кто что выбрал."""
-    if cb.message is None:
+    if not isinstance(cb.message, Message):
         return
     if q_idx >= len(game.questions):
         return
