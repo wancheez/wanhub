@@ -13,3 +13,4 @@ htmlcov/
 .vscode/
 .claude/
 logs/
+data/

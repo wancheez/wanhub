@@ -11,13 +11,16 @@
 
 import logging
 import random
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from html import escape
 
+from app.services import movies_db
 from app.services.countries import Country, get_countries
+from app.services.movies_db import MoviesDBUnavailable  # re-exported для удобства хендлера
 from app.services.trivia import (
     RawTrivia,
     TranslatedTrivia,
@@ -35,6 +38,7 @@ __all__ = [
     "Game",
     "GameAlreadyRunning",
     "GameKind",
+    "MoviesDBUnavailable",
     "NotEnoughItems",
     "Question",
     "SubmitResult",
@@ -48,6 +52,7 @@ __all__ = [
     "reset_state",
     "start_capital_game",
     "start_flag_game",
+    "start_movie_game",
     "start_trivia_game",
     "submit_answer",
 ]
@@ -57,6 +62,7 @@ class GameKind(Enum):
     FLAG = "flag"
     CAPITAL = "capital"
     TRIVIA = "trivia"
+    MOVIE = "movie"
 
 
 @dataclass(frozen=True)
@@ -76,6 +82,10 @@ class Question:
     correct_idx: int
     image_url: str | None = None
     category: str | None = None
+    # Готовые байты картинки (после обработки на нашей стороне, например
+    # обрезанный кадр фильма). Если задано — отправляется как
+    # BufferedInputFile; image_url игнорируется.
+    image_bytes: bytes | None = None
 
 
 @dataclass
@@ -90,6 +100,10 @@ class Game:
     answers: list[dict[int, int]] = field(default_factory=list)
     # user_id -> отображаемое имя (для финальной таблицы)
     players: dict[int, str] = field(default_factory=dict)
+    # Опциональная подпись, которая показывается в шапке каждого вопроса
+    # (например: «🍿 Известные · топ-100» для /movie или «Сложность: 😱
+    # Сложная» для /quiz). Wizard ставит её после успешного start_X_game.
+    subtitle: str | None = None
 
     @property
     def total(self) -> int:
@@ -179,6 +193,114 @@ async def start_trivia_game(
         translated = [_raw_as_translated(r) for r in raw]
     questions = _build_trivia_questions(translated)
     return _register(chat_id, GameKind.TRIVIA, starter_id, questions)
+
+
+# Пул фильмов: уровень популярности → сколько верхних позиций берём из
+# локальной БД. Easy = только мейнстрим (топ-100), Hard = глубокий пул,
+# где появляются не сразу узнаваемые тайтлы. База заполняется заранее
+# скриптом scripts/fetch_movies.py (см. movies_db).
+#
+# Публичный словарь: лейблы кнопок в handlers/movie.py подтягивают
+# цифры отсюда, чтобы не было рассинхрона UI и backend'а.
+MOVIE_POOL_SIZES: dict[str, int] = {
+    "easy": 100,
+    "medium": 500,
+    "hard": 1000,
+}
+
+
+def start_movie_game(
+    chat_id: int,
+    num_questions: int,
+    starter_id: int,
+    *,
+    popularity: str,
+) -> Game:
+    """Игра «угадай фильм по кадру» из локальной SQLite-базы.
+
+    База предзаполнена `scripts/fetch_movies.py`: фильмы + готовые
+    CENTER_30-фрагменты JPEG в BLOB'ах. Никаких сетевых вызовов в
+    рантайме, игра стартует мгновенно. Если базы нет — MoviesDBUnavailable.
+    """
+    if chat_id in _games:
+        raise GameAlreadyRunning()
+    if popularity not in MOVIE_POOL_SIZES:
+        raise ValueError(f"unknown popularity={popularity!r}")
+
+    pool_size = MOVIE_POOL_SIZES[popularity]
+    t_start = time.monotonic()
+
+    pool = movies_db.load_pool(pool_size)
+    if len(pool) < 4:
+        log.warning("movie: pool too small for chat=%d: %d movies", chat_id, len(pool))
+        raise NotEnoughItems()
+    if len(pool) < num_questions:
+        raise NotEnoughItems()
+
+    log.info(
+        "movie: starting chat=%d, num=%d, popularity=%s (pool=%d available)",
+        chat_id,
+        num_questions,
+        popularity,
+        len(pool),
+    )
+
+    correct_picks = random.sample(pool, num_questions)
+    questions: list[Question] = []
+    for movie in correct_picks:
+        frame_bytes = movies_db.get_random_frame(movie.id)
+        if frame_bytes is None:
+            # Не должно случаться: скрипт-фетч не вставляет фильм без кадров.
+            # Но если БД повреждена — лучше уронить старт игры, чем выдать
+            # битый вопрос.
+            log.error("movie: no frames for id=%d (%r) in DB", movie.id, movie.title)
+            raise NotEnoughItems()
+        questions.append(_build_movie_question(movie, pool, frame_bytes))
+
+    elapsed = time.monotonic() - t_start
+    total_kb = sum(len(q.image_bytes or b"") for q in questions) // 1024
+    log.info(
+        "movie: game ready for chat=%d in %.2fs (%d questions, %d KB total)",
+        chat_id,
+        elapsed,
+        len(questions),
+        total_kb,
+    )
+
+    return _register(chat_id, GameKind.MOVIE, starter_id, questions)
+
+
+def _build_movie_question(
+    correct: movies_db.Movie,
+    pool: list[movies_db.Movie],
+    frame_bytes: bytes,
+) -> Question:
+    """Собрать Question для фильма + 3 distractor'а из пула.
+
+    Защита от одинаковых лейблов на кнопках:
+      1. Из пула исключаем все фильмы с тем же title, что у correct.
+      2. Среди оставшихся берём по одному «представителю» на каждый
+         уникальный title (вторые копии-омонимы просто не попадают
+         в выборку). Скрипт-фетч уже дедупит, но это страховка от ручных
+         правок БД и сделанная-в-будущем «несезонная» нагрузка.
+    """
+    seen = {correct.title}
+    others: list[movies_db.Movie] = []
+    for m in pool:
+        if m.title in seen:
+            continue
+        others.append(m)
+        seen.add(m.title)
+    distractors = random.sample(others, 3)
+    opts = [correct, *distractors]
+    random.shuffle(opts)
+    correct_idx = opts.index(correct)
+    return Question(
+        prompt="Что за фильм?",
+        options=tuple(escape(m.title) for m in opts),  # type: ignore[arg-type]
+        correct_idx=correct_idx,
+        image_bytes=frame_bytes,
+    )
 
 
 def _register(chat_id: int, kind: GameKind, starter_id: int, questions: list[Question]) -> Game:

@@ -175,3 +175,32 @@ def test_game_skill_match_returns_dict():
 def test_game_skill_no_match_returns_none():
     s = StartGameSkill()
     assert s.match("привет, как дела") is None
+
+
+def test_game_match_bare_film():
+    assert extract_game_intent("фильм") == {"game": "movie", "num": None}
+
+
+def test_game_match_bare_kino():
+    assert extract_game_intent("кино") == {"game": "movie", "num": None}
+
+
+def test_game_match_bare_movie():
+    assert extract_game_intent("movie") == {"game": "movie", "num": None}
+
+
+def test_game_match_film_with_verb():
+    assert extract_game_intent("запусти фильм") == {"game": "movie", "num": None}
+
+
+def test_game_match_film_with_play_phrase():
+    assert extract_game_intent("давай сыграем в кино") == {"game": "movie", "num": None}
+
+
+def test_game_match_film_with_num():
+    assert extract_game_intent("фильм 5") == {"game": "movie", "num": 5}
+
+
+def test_game_match_film_inflection():
+    # «фильмы» / «фильма» — другие падежи
+    assert extract_game_intent("запусти фильмы") == {"game": "movie", "num": None}

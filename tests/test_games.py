@@ -4,6 +4,7 @@ import pytest
 
 from app.services import games
 from app.services.countries import Country
+from app.services.movies_db import Movie
 
 
 def _country(
@@ -321,3 +322,162 @@ def test_flag_game_too_few_countries_raises(monkeypatch: pytest.MonkeyPatch) -> 
     games.reset_state()
     with pytest.raises(games.NotEnoughItems):
         asyncio.run(games.start_flag_game(chat_id=2, num_questions=1, starter_id=1))
+
+
+# ----- start_movie_game (локальная SQLite-база) ------------------------------
+
+
+def _movie(mid: int, title: str | None = None, rank: int | None = None) -> Movie:
+    return Movie(
+        id=mid,
+        title=title if title is not None else f"Фильм {mid}",
+        original_title=f"Movie {mid}",
+        release_year="2024",
+        rank=rank if rank is not None else mid - 1,
+    )
+
+
+FAKE_MOVIES = [_movie(i) for i in range(1, 11)]  # 10 фильмов, rank 0..9
+
+
+@pytest.fixture
+def patched_movies_db(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Подменить movies_db.load_pool/get_random_frame на канву."""
+    games.reset_state()
+    calls: dict = {"frames_requested": []}
+
+    def fake_load_pool(max_rank: int) -> list[Movie]:
+        calls["max_rank"] = max_rank
+        return [m for m in FAKE_MOVIES if m.rank < max_rank]
+
+    def fake_get_frame(movie_id: int) -> bytes | None:
+        calls["frames_requested"].append(movie_id)
+        return f"frame-{movie_id}".encode()
+
+    monkeypatch.setattr(games.movies_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.movies_db, "get_random_frame", fake_get_frame)
+    return calls
+
+
+def test_start_movie_game_happy_path(patched_movies_db: dict) -> None:
+    game = games.start_movie_game(chat_id=1, num_questions=3, starter_id=42, popularity="easy")
+    assert game.kind is games.GameKind.MOVIE
+    assert game.total == 3
+    assert game.starter_id == 42
+    for q in game.questions:
+        assert q.prompt == "Что за фильм?"
+        assert len(q.options) == 4
+        assert len(set(q.options)) == 4  # все варианты разные
+        # фрагмент — это байты из БД
+        assert q.image_url is None
+        assert q.image_bytes is not None
+        assert q.image_bytes.startswith(b"frame-")
+    assert patched_movies_db["max_rank"] == 100
+
+
+def test_start_movie_game_pool_size_by_popularity(patched_movies_db: dict) -> None:
+    games.start_movie_game(chat_id=1, num_questions=1, starter_id=1, popularity="hard")
+    assert patched_movies_db["max_rank"] == 1000
+
+
+def test_start_movie_game_medium_pool(patched_movies_db: dict) -> None:
+    games.start_movie_game(chat_id=2, num_questions=1, starter_id=1, popularity="medium")
+    assert patched_movies_db["max_rank"] == 500
+
+
+def test_start_movie_game_raises_when_pool_too_small(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """В пуле меньше 4 фильмов — distractor'ов не набрать."""
+    games.reset_state()
+
+    def fake_load_pool(max_rank: int) -> list[Movie]:
+        return [_movie(1, rank=0), _movie(2, rank=1), _movie(3, rank=2)]
+
+    monkeypatch.setattr(games.movies_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.movies_db, "get_random_frame", lambda mid: b"x")
+
+    with pytest.raises(games.NotEnoughItems):
+        games.start_movie_game(chat_id=1, num_questions=1, starter_id=1, popularity="easy")
+
+
+def test_start_movie_game_raises_when_num_exceeds_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """В пуле 5 фильмов, запросили 10 — NotEnoughItems."""
+    games.reset_state()
+
+    def fake_load_pool(max_rank: int) -> list[Movie]:
+        return list(FAKE_MOVIES[:5])
+
+    monkeypatch.setattr(games.movies_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.movies_db, "get_random_frame", lambda mid: b"x")
+
+    with pytest.raises(games.NotEnoughItems):
+        games.start_movie_game(chat_id=1, num_questions=10, starter_id=1, popularity="easy")
+
+
+def test_start_movie_game_raises_on_missing_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Если БД отдала None на get_random_frame — это критическая инконсистентность."""
+    games.reset_state()
+
+    def fake_load_pool(max_rank: int) -> list[Movie]:
+        return list(FAKE_MOVIES)
+
+    monkeypatch.setattr(games.movies_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.movies_db, "get_random_frame", lambda mid: None)
+
+    with pytest.raises(games.NotEnoughItems):
+        games.start_movie_game(chat_id=1, num_questions=3, starter_id=1, popularity="easy")
+
+
+def test_start_movie_game_already_running(patched_movies_db: dict) -> None:
+    games.start_movie_game(chat_id=1, num_questions=1, starter_id=1, popularity="easy")
+    with pytest.raises(games.GameAlreadyRunning):
+        games.start_movie_game(chat_id=1, num_questions=1, starter_id=1, popularity="easy")
+
+
+def test_start_movie_game_invalid_popularity(patched_movies_db: dict) -> None:
+    with pytest.raises(ValueError):
+        games.start_movie_game(chat_id=1, num_questions=1, starter_id=1, popularity="bogus")
+
+
+def test_movie_question_distractors_are_other_movies(patched_movies_db: dict) -> None:
+    game = games.start_movie_game(chat_id=1, num_questions=3, starter_id=1, popularity="easy")
+    valid_titles = {m.title for m in FAKE_MOVIES}
+    for q in game.questions:
+        for opt in q.options:
+            assert opt in valid_titles
+
+
+def test_movie_question_distractors_dedupe_by_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Если в пуле два фильма с одинаковым title — distractors не возьмут оба."""
+    games.reset_state()
+    # Пул: первый и третий — «Король Лев», но разные id и rank
+    pool = [
+        _movie(1, title="Король Лев", rank=0),
+        _movie(2, title="Матрица", rank=1),
+        _movie(3, title="Король Лев", rank=2),
+        _movie(4, title="Начало", rank=3),
+        _movie(5, title="Гладиатор", rank=4),
+    ]
+
+    def fake_load_pool(max_rank: int) -> list[Movie]:
+        return [m for m in pool if m.rank < max_rank]
+
+    monkeypatch.setattr(games.movies_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.movies_db, "get_random_frame", lambda mid: b"x")
+
+    # Множественные запуски — поймать рандомность
+    for trial in range(20):
+        games.reset_state()
+        game = games.start_movie_game(
+            chat_id=100 + trial, num_questions=4, starter_id=1, popularity="easy"
+        )
+        for q in game.questions:
+            # никакая пара кнопок не должна совпадать по тексту
+            assert len(set(q.options)) == 4

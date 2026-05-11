@@ -12,9 +12,10 @@ from contextlib import suppress
 from html import escape
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -198,7 +199,13 @@ async def on_next(cb: CallbackQuery) -> None:
     if next_game is None:
         await cb.answer()
         return
-    await _send_question(cb.message, next_game)
+    try:
+        await _send_question(cb.message, next_game)
+    except Exception:
+        log.exception("on_next: failed to send next question in chat %d", chat_id)
+        with suppress(TelegramAPIError):
+            await cb.message.answer("⚠️ Не получилось показать следующий вопрос. Игра остановлена.")
+        games.cancel_game(chat_id)
     await cb.answer()
 
 
@@ -247,8 +254,10 @@ def _question_keyboard(game: games.Game) -> InlineKeyboardMarkup:
 
 
 def _question_header(game: games.Game, q: games.Question) -> str:
-    """Шапка вопроса: «Вопрос N/M», иногда + категория."""
+    """Шапка вопроса: «Вопрос N/M», + опц. subtitle игры, + опц. категория."""
     parts = [f"<b>Вопрос {game.current_idx + 1}/{game.total}</b>"]
+    if game.subtitle:
+        parts.append(f"<i>{escape(game.subtitle)}</i>")
     if q.category:
         parts.append(f"<i>Категория: {escape(q.category)}</i>")
     return "\n".join(parts)
@@ -265,6 +274,9 @@ def _question_text(game: games.Game, answered: list[str] | None = None) -> str:
 
 
 async def _send_question(message: Message, game: games.Game) -> None:
+    """Отправить текущий вопрос. Если фото-вариант падает (Telegram отверг
+    байты, истёкший URL, и т.п.) — фолбэчим на текстовое сообщение, чтобы
+    раунд не «завис» с нерабочей кнопкой «Далее»."""
     q = game.current_question()
     if q is None:
         return
@@ -273,21 +285,47 @@ async def _send_question(message: Message, game: games.Game) -> None:
 
     text = _question_text(game)
     kb = _question_keyboard(game)
-    if q.image_url is not None:
-        await bot.send_photo(
-            chat_id=message.chat.id,
-            photo=q.image_url,
-            caption=text,
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
-    else:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
+
+    photo: BufferedInputFile | str | None = None
+    if q.image_bytes is not None:
+        # Готовые байты (например, обрезанный кадр фильма) — отправляем
+        # как файл; Telegram не умеет «edit caption» сменой картинки, но
+        # для caption-only обновлений (refresh/finalize) это не нужно.
+        photo = BufferedInputFile(q.image_bytes, filename="frame.jpg")
+    elif q.image_url is not None:
+        photo = q.image_url
+
+    if photo is not None:
+        try:
+            await bot.send_photo(
+                chat_id=message.chat.id,
+                photo=photo,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            return
+        except TelegramAPIError as e:
+            # Битые байты/URL/слишком большая картинка — теряем фото, но
+            # игроки увидят варианты и игра не зависает на «Далее».
+            log.warning(
+                "send_photo failed for q%d in chat %d: %s — falling back to text",
+                game.current_idx,
+                message.chat.id,
+                e,
+            )
+
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text=text,
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+def _has_photo(q: games.Question) -> bool:
+    """Вопрос отправлялся как фото (URL или готовые байты)?"""
+    return q.image_url is not None or q.image_bytes is not None
 
 
 async def _refresh_question_caption(cb: CallbackQuery, game: games.Game, q_idx: int) -> None:
@@ -299,7 +337,7 @@ async def _refresh_question_caption(cb: CallbackQuery, game: games.Game, q_idx: 
     q = game.current_question()
     assert q is not None
     with suppress(TelegramBadRequest):
-        if q.image_url is not None:
+        if _has_photo(q):
             await cb.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=kb)
         else:
             await cb.message.edit_text(text=text, parse_mode="HTML", reply_markup=kb)
@@ -315,6 +353,8 @@ async def _finalize_round_caption(cb: CallbackQuery, game: games.Game, q_idx: in
     answers = game.answers[q_idx]
 
     header_parts = [f"<b>Вопрос {q_idx + 1}/{game.total}</b>"]
+    if game.subtitle:
+        header_parts.append(f"<i>{escape(game.subtitle)}</i>")
     if q.category:
         header_parts.append(f"<i>Категория: {escape(q.category)}</i>")
     lines = [
@@ -333,7 +373,7 @@ async def _finalize_round_caption(cb: CallbackQuery, game: games.Game, q_idx: in
 
     text = "\n".join(lines)
     with suppress(TelegramBadRequest):
-        if q.image_url is not None:
+        if _has_photo(q):
             await cb.message.edit_caption(caption=text, parse_mode="HTML")
         else:
             await cb.message.edit_text(text=text, parse_mode="HTML")

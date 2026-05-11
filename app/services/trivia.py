@@ -156,9 +156,7 @@ async def _http_get_json(
 
 
 async def _request_token(client: httpx.AsyncClient) -> str:
-    data = await _http_get_json(
-        client, f"{TRIVIA_API_URL}/api_token.php", {"command": "request"}
-    )
+    data = await _http_get_json(client, f"{TRIVIA_API_URL}/api_token.php", {"command": "request"})
     if data.get("response_code") != 0 or not data.get("token"):
         raise TriviaUnavailable(f"token request failed: {data}")
     log.info("trivia: got new session token")

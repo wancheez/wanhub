@@ -51,6 +51,32 @@ TRIVIA_TIMEOUT_S: float = 6.0
 # предел для одного батч-перевода через Claude и компактного wizard'а.
 TRIVIA_MAX_QUESTIONS: int = 20
 
+# TMDB (https://www.themoviedb.org/) — нужен ХОТЯ БЫ один из двух способов
+# авторизации. TMDB_BEARER_TOKEN — v4 Read Access Token (JWT, начинается с
+# eyJ...); используется как Authorization: Bearer <token> и имеет приоритет.
+# TMDB_API_KEY — короткий v3 hex-ключ, передаётся как ?api_key=...
+# Пусто и там и там → /movie покажет понятную ошибку, остальные игры работают.
+TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "").strip()
+TMDB_BEARER_TOKEN: str = os.getenv("TMDB_BEARER_TOKEN", "").strip()
+TMDB_API_URL: str = os.getenv("TMDB_API_URL", "https://api.themoviedb.org/3").rstrip("/")
+TMDB_IMAGE_BASE: str = os.getenv("TMDB_IMAGE_BASE", "https://image.tmdb.org/t/p").rstrip("/")
+TMDB_TIMEOUT_S: float = 6.0
+# Опциональный HTTP/SOCKS-прокси ТОЛЬКО для TMDB-запросов. Нужен, если
+# системный DNS «портит» api.themoviedb.org (FakeDNS у v2rayA/Clash и т.п.).
+# Формат httpx: "http://host:port" или "socks5://host:port" (последнее
+# требует доп. зависимости httpx-socks). Пусто → ходим напрямую.
+TMDB_PROXY: str = os.getenv("TMDB_PROXY", "").strip()
+# Размер бэкдропа: TMDB поддерживает w300/w780/w1280/original. w780 —
+# баланс «качество vs трафик» для бота на Pi.
+TMDB_BACKDROP_SIZE: str = "w780"
+MOVIE_MAX_QUESTIONS: int = 20
+
+# Локальная SQLite-база с пре-нарезанными кадрами популярных фильмов.
+# Заполняется один раз скриптом scripts/fetch_movies.py; в рантайме бот
+# только читает её (read-only). Если файла нет — игра /movie выдаёт
+# понятную ошибку, остальные игры работают.
+MOVIES_DB_PATH: Path = PROJECT_ROOT / "data" / "movies.sqlite3"
+
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
 

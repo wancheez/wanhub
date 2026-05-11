@@ -241,6 +241,10 @@ async def on_go(cb: CallbackQuery) -> None:
         game = await games.start_trivia_game(
             chat_id, num, owner_id, category=category, difficulty=difficulty
         )
+        # Категория уже видна на каждом вопросе (q.category); выносим только
+        # выбранную сложность — она общая для всей игры и нигде больше не
+        # фигурирует.
+        game.subtitle = f"Сложность: {_DIFFICULTY_LABELS[diff]}"
     except games.GameAlreadyRunning:
         with _suppress_edit_noop():
             await cb.message.edit_text("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")

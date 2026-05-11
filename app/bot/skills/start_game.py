@@ -25,8 +25,12 @@ from app.services import games
 
 log = logging.getLogger("app")
 
-# Названия игр + любые окончания/падежи: «квиз», «викторину», «флаги», «столицу»…
-_GAME_NOUN_RE = r"(квиз\w*|викторин\w*|флаг(?:и|ов|ах|ам|у)?|флажк\w*|столиц\w*)"
+# Названия игр + любые окончания/падежи: «квиз», «викторину», «флаги», «столицу»,
+# «фильм», «кино», «movie».
+_GAME_NOUN_RE = (
+    r"(квиз\w*|викторин\w*|флаг(?:и|ов|ах|ам|у)?|флажк\w*|столиц\w*|"
+    r"фильм\w*|кино|movie)"
+)
 
 # Стартовые глаголы. «давай» допускает дополнительный глагол («давай сыграем»).
 _START_VERB_RE = (
@@ -49,7 +53,7 @@ _BARE_RE = re.compile(rf"^\s*{_GAME_NOUN_RE}{_NUM_RE}\s*[.!?]*\s*$", re.IGNORECA
 
 
 def _resolve_game(word: str) -> str | None:
-    """Привести слово к каноничному имени игры: 'quiz' | 'flags' | 'capitals'."""
+    """Привести слово к каноничному имени игры."""
     w = word.lower()
     if w.startswith(("квиз", "викторин")):
         return "quiz"
@@ -57,6 +61,8 @@ def _resolve_game(word: str) -> str | None:
         return "flags"
     if w.startswith("столиц"):
         return "capitals"
+    if w.startswith(("фильм", "кино", "movie")):
+        return "movie"
     return None
 
 
@@ -99,6 +105,12 @@ class StartGameSkill:
         # зовёт try_skills), поэтому top-level импорт хендлера сюда даёт
         # циклический импорт. Внутри функции — уже инициализированы оба пакета.
         from app.bot.handlers.games import _send_question
+        from app.bot.handlers.movie import (
+            _num_keyboard as _movie_num_keyboard,
+        )
+        from app.bot.handlers.movie import (
+            _popularity_keyboard as _movie_popularity_keyboard,
+        )
         from app.bot.handlers.trivia import _category_keyboard, _num_keyboard
 
         game_name: str = params["game"]
@@ -125,6 +137,25 @@ class StartGameSkill:
                     "<b>🎲 Квиз Open Trivia</b>\nСколько вопросов?",
                     parse_mode="HTML",
                     reply_markup=_num_keyboard(starter_id),
+                )
+            return
+
+        if game_name == "movie":
+            # У /movie два параметра выбора (популярность + размер кадра) —
+            # сразу запускать игру по голому «фильмы» нельзя, иначе игрок
+            # не контролирует сложность. Идём через wizard.
+            if params["num"]:
+                num = params["num"]
+                await message.answer(
+                    f"<b>🎬 Угадай фильм по кадру</b>\n{num} вопросов.\nНасколько известный фильм?",
+                    parse_mode="HTML",
+                    reply_markup=_movie_popularity_keyboard(starter_id, num),
+                )
+            else:
+                await message.answer(
+                    "<b>🎬 Угадай фильм по кадру</b>\nСколько вопросов?",
+                    parse_mode="HTML",
+                    reply_markup=_movie_num_keyboard(starter_id),
                 )
             return
 
