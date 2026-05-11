@@ -9,10 +9,12 @@ opentdb.com отдаёт английские multi-choice вопросы без
 не окупится.
 """
 
+import asyncio
 import json
 import logging
 import urllib.parse
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from anthropic import APIError, AsyncAnthropic
@@ -126,24 +128,49 @@ def reset_session_state() -> None:
     _session_token = None
 
 
+# opentdb лимитит 1 req / 5s по IP. На HTTP 429 спим столько и retry'им один раз.
+_RATE_LIMIT_RETRY_S = 5.0
+
+
+async def _http_get_json(
+    client: httpx.AsyncClient, url: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    """GET к opentdb с auto-retry на HTTP 429 (один раз, sleep 5s).
+
+    Любой не-429 статус: проверяем стандартным raise_for_status и парсим JSON.
+    Если и после ретрая 429 — бросаем TriviaUnavailable с понятной формулировкой
+    (raw httpx-ошибка про MDN-ссылку юзеру не нужна).
+    """
+    for attempt in range(2):
+        resp = await client.get(url, params=params)
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp.json()
+        if attempt == 0:
+            log.info("trivia: HTTP 429, sleeping %.1fs and retrying", _RATE_LIMIT_RETRY_S)
+            await asyncio.sleep(_RATE_LIMIT_RETRY_S)
+    raise TriviaUnavailable(
+        f"opentdb ограничивает запросы (HTTP 429). Подожди {_RATE_LIMIT_RETRY_S:.0f} сек "
+        "и попробуй снова."
+    )
+
+
 async def _request_token(client: httpx.AsyncClient) -> str:
-    resp = await client.get(f"{TRIVIA_API_URL}/api_token.php", params={"command": "request"})
-    resp.raise_for_status()
-    data = resp.json()
+    data = await _http_get_json(
+        client, f"{TRIVIA_API_URL}/api_token.php", {"command": "request"}
+    )
     if data.get("response_code") != 0 or not data.get("token"):
         raise TriviaUnavailable(f"token request failed: {data}")
-    token = str(data["token"])
     log.info("trivia: got new session token")
-    return token
+    return str(data["token"])
 
 
 async def _reset_token(client: httpx.AsyncClient, token: str) -> None:
-    resp = await client.get(
+    data = await _http_get_json(
+        client,
         f"{TRIVIA_API_URL}/api_token.php",
-        params={"command": "reset", "token": token},
+        {"command": "reset", "token": token},
     )
-    resp.raise_for_status()
-    data = resp.json()
     if data.get("response_code") != 0:
         raise TriviaUnavailable(f"token reset failed: {data}")
     log.info("trivia: session token reset (pool exhausted, restarting)")
@@ -184,9 +211,7 @@ async def fetch_trivia(
                 params["difficulty"] = difficulty
 
             try:
-                resp = await client.get(f"{TRIVIA_API_URL}/api.php", params=params)
-                resp.raise_for_status()
-                data = resp.json()
+                data = await _http_get_json(client, f"{TRIVIA_API_URL}/api.php", params)
             except (httpx.HTTPError, ValueError) as e:
                 raise TriviaUnavailable(str(e)) from e
 

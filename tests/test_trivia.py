@@ -45,11 +45,17 @@ def _raw_item(
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
         self._payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
-        return None
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=httpx.Request("GET", "http://x"),
+                response=httpx.Response(self.status_code),
+            )
 
     def json(self) -> dict[str, Any]:
         return self._payload
@@ -57,10 +63,12 @@ class _FakeResponse:
 
 class _FakeClient:
     """Минимальный заменитель httpx.AsyncClient: отдаёт по очереди заранее
-    подготовленные ответы. История вызовов доступна для assert.
+    подготовленные ответы. Элемент responses — либо dict (статус 200), либо
+    кортеж `(status_code, payload)` для не-200 ответов. История вызовов
+    доступна для assert.
     """
 
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
+    def __init__(self, responses: list[Any]) -> None:
         self._responses = list(responses)
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -74,7 +82,11 @@ class _FakeClient:
         self.calls.append((url, dict(params or {})))
         if not self._responses:
             raise AssertionError(f"unexpected extra GET to {url}")
-        return _FakeResponse(self._responses.pop(0))
+        item = self._responses.pop(0)
+        if isinstance(item, tuple):
+            status, payload = item
+            return _FakeResponse(payload, status_code=status)
+        return _FakeResponse(item)
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +192,37 @@ def test_fetch_trivia_rate_limit_raises(monkeypatch: pytest.MonkeyPatch) -> None
         ],
     )
     with pytest.raises(TriviaUnavailable, match="rate limit"):
+        asyncio.run(trivia.fetch_trivia(1))
+
+
+def test_fetch_trivia_retries_on_http_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    """429 от opentdb (IP-rate-limit) → один retry со sleep → успех."""
+    monkeypatch.setattr(trivia, "_RATE_LIMIT_RETRY_S", 0)  # не спим в тестах
+    fake = _patch_client(
+        monkeypatch,
+        responses=[
+            {"response_code": 0, "token": "T"},  # token request OK
+            (429, {}),  # main fetch — IP rate-limited
+            _ok_payload([_raw_item("Q", "A", ["b", "c", "d"])]),  # retry succeeds
+        ],
+    )
+    out = asyncio.run(trivia.fetch_trivia(1))
+    assert len(out) == 1
+    assert len(fake.calls) == 3  # token + 429 + retry
+
+
+def test_fetch_trivia_429_after_retry_raises_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Если 429 повторяется и после retry — пробрасываем понятный TriviaUnavailable."""
+    monkeypatch.setattr(trivia, "_RATE_LIMIT_RETRY_S", 0)
+    _patch_client(
+        monkeypatch,
+        responses=[
+            {"response_code": 0, "token": "T"},
+            (429, {}),
+            (429, {}),
+        ],
+    )
+    with pytest.raises(TriviaUnavailable, match="HTTP 429"):
         asyncio.run(trivia.fetch_trivia(1))
 
 
