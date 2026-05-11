@@ -266,7 +266,10 @@ def _question_header(game: games.Game, q: games.Question) -> str:
 def _question_text(game: games.Game, answered: list[str] | None = None) -> str:
     q = game.current_question()
     assert q is not None
-    parts = [_question_header(game, q), q.prompt]
+    # Сам вопрос — в <blockquote>, чтобы Telegram отрисовал его с
+    # вертикальной полосой слева и отступом. Это визуально отделяет
+    # формулировку от шапки (Вопрос/Сложность/Категория).
+    parts = [_question_header(game, q), f"<blockquote>{q.prompt}</blockquote>"]
     if answered:
         names = ", ".join(escape(n) for n in answered)
         parts.append(f"\nОтветили: {names}")
@@ -359,7 +362,7 @@ async def _finalize_round_caption(cb: CallbackQuery, game: games.Game, q_idx: in
         header_parts.append(f"<i>Категория: {escape(q.category)}</i>")
     lines = [
         *header_parts,
-        q.prompt,
+        f"<blockquote>{q.prompt}</blockquote>",
         f"Правильный ответ: <b>{q.options[q.correct_idx]}</b>",
     ]
     if answers:

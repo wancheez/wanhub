@@ -204,3 +204,27 @@ def test_game_match_film_with_num():
 def test_game_match_film_inflection():
     # «фильмы» / «фильма» — другие падежи
     assert extract_game_intent("запусти фильмы") == {"game": "movie", "num": None}
+
+
+def test_game_match_bare_serial():
+    assert extract_game_intent("сериал") == {"game": "show", "num": None}
+
+
+def test_game_match_bare_show():
+    assert extract_game_intent("show") == {"game": "show", "num": None}
+
+
+def test_game_match_bare_series():
+    assert extract_game_intent("series") == {"game": "show", "num": None}
+
+
+def test_game_match_serial_with_verb():
+    assert extract_game_intent("запусти сериал") == {"game": "show", "num": None}
+
+
+def test_game_match_serial_with_num():
+    assert extract_game_intent("сериал 10") == {"game": "show", "num": 10}
+
+
+def test_game_match_serial_inflection():
+    assert extract_game_intent("давай сериалы") == {"game": "show", "num": None}

@@ -115,7 +115,7 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, responses: list[Any]) -> _Fak
     return fake
 
 
-# ---------- fetch_popular_movies ---------------------------------------------
+# ---------- fetch_top_rated_movies ---------------------------------------------
 
 
 def test_fetch_popular_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,7 +125,7 @@ def test_fetch_popular_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
             _popular_payload([_movie_item(1, "Фильм 1"), _movie_item(2, "Фильм 2")]),
         ],
     )
-    movies = asyncio.run(tmdb.fetch_popular_movies(2))
+    movies = asyncio.run(tmdb.fetch_top_rated_movies(2))
     assert [m.id for m in movies] == [1, 2]
     assert movies[0].title == "Фильм 1"
     assert movies[0].release_year == "2024"
@@ -149,7 +149,7 @@ def test_fetch_popular_filters_adult_and_no_backdrop(monkeypatch: pytest.MonkeyP
             ),
         ],
     )
-    movies = asyncio.run(tmdb.fetch_popular_movies(10))
+    movies = asyncio.run(tmdb.fetch_top_rated_movies(10))
     assert [m.id for m in movies] == [1, 4]
 
 
@@ -177,7 +177,7 @@ def test_fetch_popular_requires_cyrillic_title(monkeypatch: pytest.MonkeyPatch) 
             ),
         ],
     )
-    movies = asyncio.run(tmdb.fetch_popular_movies(10))
+    movies = asyncio.run(tmdb.fetch_top_rated_movies(10))
     titles = [m.title for m in movies]
     assert titles == ["Паразиты", "Начало"]
 
@@ -226,7 +226,7 @@ def test_fetch_popular_sanitizes_titles(monkeypatch: pytest.MonkeyPatch) -> None
             ),
         ],
     )
-    movies = asyncio.run(tmdb.fetch_popular_movies(1))
+    movies = asyncio.run(tmdb.fetch_top_rated_movies(1))
     assert movies[0].title == "Начало"
 
 
@@ -259,7 +259,7 @@ def test_fetch_popular_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
             _popular_payload([_movie_item(i) for i in range(21, 41)], total_pages=5),
         ],
     )
-    movies = asyncio.run(tmdb.fetch_popular_movies(25))
+    movies = asyncio.run(tmdb.fetch_top_rated_movies(25))
     assert len(movies) == 25
     assert fake.calls[0][1]["page"] == 1
     assert fake.calls[1][1]["page"] == 2
@@ -273,7 +273,7 @@ def test_fetch_popular_stops_at_total_pages(monkeypatch: pytest.MonkeyPatch) -> 
             _popular_payload([_movie_item(i) for i in range(1, 11)], total_pages=1),
         ],
     )
-    movies = asyncio.run(tmdb.fetch_popular_movies(50))
+    movies = asyncio.run(tmdb.fetch_top_rated_movies(50))
     assert len(movies) == 10
     assert len(fake.calls) == 1
 
@@ -285,8 +285,8 @@ def test_fetch_popular_caches_within_ttl(monkeypatch: pytest.MonkeyPatch) -> Non
             _popular_payload([_movie_item(1), _movie_item(2), _movie_item(3)]),
         ],
     )
-    first = asyncio.run(tmdb.fetch_popular_movies(3))
-    second = asyncio.run(tmdb.fetch_popular_movies(3))
+    first = asyncio.run(tmdb.fetch_top_rated_movies(3))
+    second = asyncio.run(tmdb.fetch_top_rated_movies(3))
     assert first == second
     assert len(fake.calls) == 1  # network hit once
 
@@ -299,8 +299,8 @@ def test_fetch_popular_cache_serves_smaller_pool(monkeypatch: pytest.MonkeyPatch
             _popular_payload([_movie_item(i) for i in (1, 2, 3, 4, 5)]),
         ],
     )
-    asyncio.run(tmdb.fetch_popular_movies(5))
-    out = asyncio.run(tmdb.fetch_popular_movies(3))
+    asyncio.run(tmdb.fetch_top_rated_movies(5))
+    out = asyncio.run(tmdb.fetch_top_rated_movies(3))
     assert [m.id for m in out] == [1, 2, 3]
     assert len(fake.calls) == 1
 
@@ -313,7 +313,7 @@ def test_fetch_popular_429_retry(monkeypatch: pytest.MonkeyPatch) -> None:
             _popular_payload([_movie_item(1)]),
         ],
     )
-    out = asyncio.run(tmdb.fetch_popular_movies(1))
+    out = asyncio.run(tmdb.fetch_top_rated_movies(1))
     assert out[0].id == 1
     assert len(fake.calls) == 2
 
@@ -327,14 +327,14 @@ def test_fetch_popular_persistent_429_raises(monkeypatch: pytest.MonkeyPatch) ->
         ],
     )
     with pytest.raises(TMDBUnavailable, match="429"):
-        asyncio.run(tmdb.fetch_popular_movies(1))
+        asyncio.run(tmdb.fetch_top_rated_movies(1))
 
 
 def test_fetch_popular_missing_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tmdb, "TMDB_API_KEY", "")
     monkeypatch.setattr(tmdb, "TMDB_BEARER_TOKEN", "")
     with pytest.raises(TMDBUnavailable, match="TMDB_BEARER_TOKEN"):
-        asyncio.run(tmdb.fetch_popular_movies(1))
+        asyncio.run(tmdb.fetch_top_rated_movies(1))
 
 
 def test_fetch_popular_http_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,7 +350,7 @@ def test_fetch_popular_http_error_raises(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(tmdb.httpx, "AsyncClient", lambda *a, **k: _BoomClient())
     with pytest.raises(TMDBUnavailable):
-        asyncio.run(tmdb.fetch_popular_movies(1))
+        asyncio.run(tmdb.fetch_top_rated_movies(1))
 
 
 # ---------- fetch_clean_backdrops --------------------------------------------
@@ -554,7 +554,7 @@ def test_fetch_popular_uses_bearer_no_api_key_in_params(
         monkeypatch,
         responses=[_popular_payload([_movie_item(1)])],
     )
-    asyncio.run(tmdb.fetch_popular_movies(1))
+    asyncio.run(tmdb.fetch_top_rated_movies(1))
     params = fake.calls[0][1]
     assert "api_key" not in params
     assert params["language"] == "ru-RU"

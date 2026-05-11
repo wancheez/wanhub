@@ -93,7 +93,17 @@ class FrameMedia:
 _RATE_LIMIT_RETRY_S = 1.0
 _POOL_TTL_S = 6 * 3600  # 6 часов: TMDB-популярность обновляется не чаще
 
-_pool_cache: tuple[float, list[Movie]] | None = None  # (timestamp, movies)
+# Кеш на каждый тип медиа отдельно ("movie" → top-rated фильмы,
+# "tv" → top-rated сериалы). Запрашиваем разные endpoint'ы, разные
+# JSON-поля; смешивать нельзя.
+_pool_cache: dict[str, tuple[float, list[Movie]]] = {}
+
+# JSON-поля у TMDB для movie и tv разные — карта помогает не дублировать код.
+_KIND_FIELDS: dict[str, tuple[str, str, str]] = {
+    # kind → (title_field, original_title_field, date_field)
+    "movie": ("title", "original_title", "release_date"),
+    "tv": ("name", "original_name", "first_air_date"),
+}
 
 
 _TITLE_WS_RE = re.compile(r"\s+")
@@ -151,9 +161,8 @@ def _is_user_readable(s: str) -> bool:
 
 
 def reset_cache() -> None:
-    """Сбросить кеш популярных фильмов (для тестов)."""
-    global _pool_cache
-    _pool_cache = None
+    """Сбросить кеш популярных фильмов/сериалов (для тестов)."""
+    _pool_cache.clear()
 
 
 async def _http_get_json(
@@ -208,25 +217,38 @@ def _client_kwargs(timeout: float | httpx.Timeout) -> dict[str, Any]:
     return kwargs
 
 
-async def _fetch_popular_pages(client: httpx.AsyncClient, pool_size: int) -> list[Movie]:
-    """Постранично собрать `pool_size` фильмов из /movie/popular.
+async def _fetch_top_rated_pages(
+    client: httpx.AsyncClient, kind: str, pool_size: int
+) -> list[Movie]:
+    """Постранично собрать `pool_size` элементов из /{kind}/top_rated.
+
+    `kind` — "movie" или "tv". Используем top_rated, а не /popular: popular
+    на TMDB ранжируется по «горячести прямо сейчас» (клики/просмотры),
+    поэтому в топ лезут непремьеры и анонсы — для игры на узнавание это
+    плохо. top_rated ранжируется по средней оценке зрителей и стабилен.
 
     TMDB отдаёт 20 элементов на страницу. Фильтруем 18+ и записи без
     backdrop_path (без кадра играть нельзя).
     """
+    if kind not in _KIND_FIELDS:
+        raise ValueError(f"unknown kind={kind!r}")
+    title_field, orig_field, date_field = _KIND_FIELDS[kind]
+    # TMDB не возвращает adult-флаг для /tv/top_rated (там другая разметка),
+    # но для безопасности всегда передаём include_adult=false на movie.
     headers, auth_params = _auth_request_args()
     pages_needed = max(1, math.ceil(pool_size / 20))
     out: list[Movie] = []
     for page in range(1, pages_needed + 1):
-        params = {
+        params: dict[str, Any] = {
             **auth_params,
             "language": "ru-RU",
             "page": page,
-            "include_adult": "false",
         }
+        if kind == "movie":
+            params["include_adult"] = "false"
         try:
             data = await _http_get_json(
-                client, f"{TMDB_API_URL}/movie/popular", params, headers=headers
+                client, f"{TMDB_API_URL}/{kind}/top_rated", params, headers=headers
             )
         except httpx.HTTPError as e:
             raise TMDBUnavailable(f"TMDB недоступен: {e}") from e
@@ -237,22 +259,23 @@ async def _fetch_popular_pages(client: httpx.AsyncClient, pool_size: int) -> lis
             backdrop = item.get("backdrop_path")
             if not backdrop:
                 continue
-            ru_title = _sanitize_title(item.get("title") or "")
-            orig_title = _sanitize_title(item.get("original_title") or "")
+            ru_title = _sanitize_title(item.get(title_field) or "")
+            orig_title = _sanitize_title(item.get(orig_field) or "")
             # Требуем именно русский title: хоть один кириллический символ +
             # все остальные буквы — кириллица/латиница. Без локализации
             # TMDB кладёт в title оригинал (CJK/тайский/латиница), и такой
             # фильм игроку без знания языка ничего не даёт — выкидываем.
             if not (ru_title and _has_cyrillic(ru_title) and _is_user_readable(ru_title)):
                 log.info(
-                    "tmdb: skipping movie id=%s — no russian title (ru=%r, orig=%r)",
+                    "tmdb: skipping %s id=%s — no russian title (ru=%r, orig=%r)",
+                    kind,
                     item.get("id"),
                     ru_title,
                     orig_title,
                 )
                 continue
             title = ru_title
-            release_date = item.get("release_date") or ""
+            release_date = item.get(date_field) or ""
             year = release_date[:4] if len(release_date) >= 4 else ""
             out.append(
                 Movie(
@@ -272,42 +295,57 @@ async def _fetch_popular_pages(client: httpx.AsyncClient, pool_size: int) -> lis
     return out
 
 
-async def fetch_popular_movies(pool_size: int) -> list[Movie]:
-    """Получить список популярных фильмов длиной до `pool_size`.
+async def fetch_top_rated(kind: str, pool_size: int) -> list[Movie]:
+    """Получить топ-N высокорейтинговых фильмов или сериалов (по `kind`).
 
-    Кешируем: храним самую большую запрошенную выдачу, для меньших
-    `pool_size` отдаём префикс. Кеш живёт 6ч.
+    Кеш на каждый kind свой, TTL 6ч. Для меньшего pool_size отдаём префикс
+    уже закешированной большей выдачи.
     """
-    global _pool_cache
     now = time.monotonic()
-    if _pool_cache is not None:
-        ts, movies = _pool_cache
-        if (now - ts) < _POOL_TTL_S and len(movies) >= pool_size:
-            return movies[:pool_size]
+    cached = _pool_cache.get(kind)
+    if cached is not None:
+        ts, items = cached
+        if (now - ts) < _POOL_TTL_S and len(items) >= pool_size:
+            return items[:pool_size]
 
     async with httpx.AsyncClient(**_client_kwargs(TMDB_TIMEOUT_S)) as client:
-        movies = await _fetch_popular_pages(client, pool_size)
+        items = await _fetch_top_rated_pages(client, kind, pool_size)
 
-    _pool_cache = (now, movies)
-    log.info("tmdb: cached %d popular movies (requested %d)", len(movies), pool_size)
-    return movies[:pool_size]
+    _pool_cache[kind] = (now, items)
+    log.info("tmdb: cached %d top-rated %s items (requested %d)", len(items), kind, pool_size)
+    return items[:pool_size]
 
 
-async def fetch_clean_backdrops(client: httpx.AsyncClient, movie_id: int) -> list[str]:
+async def fetch_top_rated_movies(pool_size: int) -> list[Movie]:
+    """Обёртка для обратной совместимости — вызывает fetch_top_rated('movie')."""
+    return await fetch_top_rated("movie", pool_size)
+
+
+async def fetch_top_rated_shows(pool_size: int) -> list[Movie]:
+    """Топ-N сериалов из /tv/top_rated."""
+    return await fetch_top_rated("tv", pool_size)
+
+
+async def fetch_clean_backdrops(
+    client: httpx.AsyncClient, item_id: int, kind: str = "movie"
+) -> list[str]:
     """Вернуть file_path'ы бэкдропов без вшитого текста/логотипа.
 
-    TMDB отмечает локализованные бэкдропы кодом языка (en/ru/...);
-    `include_image_language=null` оставляет только нейтральные. Это
-    лучшее приближение «случайного кадра без названия фильма».
+    `kind` = "movie" или "tv". TMDB отмечает локализованные бэкдропы кодом
+    языка; `include_image_language=null` оставляет только нейтральные —
+    лучшее приближение «случайного кадра без названия». kind по умолчанию
+    "movie" для обратной совместимости со script'ом фильмов.
     """
+    if kind not in _KIND_FIELDS:
+        raise ValueError(f"unknown kind={kind!r}")
     headers, auth_params = _auth_request_args()
     params = {**auth_params, "include_image_language": "null"}
     try:
         data = await _http_get_json(
-            client, f"{TMDB_API_URL}/movie/{movie_id}/images", params, headers=headers
+            client, f"{TMDB_API_URL}/{kind}/{item_id}/images", params, headers=headers
         )
     except httpx.HTTPError as e:
-        log.info("tmdb: backdrops fetch failed for %d: %s", movie_id, type(e).__name__)
+        log.info("tmdb: backdrops fetch failed for %s %d: %s", kind, item_id, type(e).__name__)
         return []
     return [b["file_path"] for b in data.get("backdrops") or [] if b.get("file_path")]
 

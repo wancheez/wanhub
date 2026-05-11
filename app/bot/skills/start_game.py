@@ -29,7 +29,7 @@ log = logging.getLogger("app")
 # «фильм», «кино», «movie».
 _GAME_NOUN_RE = (
     r"(квиз\w*|викторин\w*|флаг(?:и|ов|ах|ам|у)?|флажк\w*|столиц\w*|"
-    r"фильм\w*|кино|movie)"
+    r"фильм\w*|кино|movie|сериал\w*|show|series)"
 )
 
 # Стартовые глаголы. «давай» допускает дополнительный глагол («давай сыграем»).
@@ -63,6 +63,8 @@ def _resolve_game(word: str) -> str | None:
         return "capitals"
     if w.startswith(("фильм", "кино", "movie")):
         return "movie"
+    if w.startswith(("сериал", "show", "series")):
+        return "show"
     return None
 
 
@@ -156,6 +158,30 @@ class StartGameSkill:
                     "<b>🎬 Угадай фильм по кадру</b>\nСколько вопросов?",
                     parse_mode="HTML",
                     reply_markup=_movie_num_keyboard(starter_id),
+                )
+            return
+
+        if game_name == "show":
+            from app.bot.handlers.show import (
+                _num_keyboard as _show_num_keyboard,
+            )
+            from app.bot.handlers.show import (
+                _popularity_keyboard as _show_popularity_keyboard,
+            )
+
+            if params["num"]:
+                num = params["num"]
+                await message.answer(
+                    f"<b>📺 Угадай сериал по кадру</b>\n{num} вопросов.\n"
+                    "Насколько известный сериал?",
+                    parse_mode="HTML",
+                    reply_markup=_show_popularity_keyboard(starter_id, num),
+                )
+            else:
+                await message.answer(
+                    "<b>📺 Угадай сериал по кадру</b>\nСколько вопросов?",
+                    parse_mode="HTML",
+                    reply_markup=_show_num_keyboard(starter_id),
                 )
             return
 

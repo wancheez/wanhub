@@ -481,3 +481,87 @@ def test_movie_question_distractors_dedupe_by_title(
         for q in game.questions:
             # никакая пара кнопок не должна совпадать по тексту
             assert len(set(q.options)) == 4
+
+
+# ----- start_show_game (зеркало movie через shows_db) ------------------------
+
+from app.services.shows_db import Show  # noqa: E402
+
+
+def _show(sid: int, title: str | None = None, rank: int | None = None) -> Show:
+    return Show(
+        id=sid,
+        title=title if title is not None else f"Сериал {sid}",
+        original_title=f"Show {sid}",
+        release_year="2024",
+        rank=rank if rank is not None else sid - 1,
+    )
+
+
+FAKE_SHOWS = [_show(i) for i in range(1, 11)]
+
+
+@pytest.fixture
+def patched_shows_db(monkeypatch: pytest.MonkeyPatch) -> dict:
+    games.reset_state()
+    calls: dict = {"frames_requested": []}
+
+    def fake_load_pool(max_rank: int) -> list[Show]:
+        calls["max_rank"] = max_rank
+        return [s for s in FAKE_SHOWS if s.rank < max_rank]
+
+    def fake_get_frame(show_id: int) -> bytes | None:
+        calls["frames_requested"].append(show_id)
+        return f"show-frame-{show_id}".encode()
+
+    monkeypatch.setattr(games.shows_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.shows_db, "get_random_frame", fake_get_frame)
+    return calls
+
+
+def test_start_show_game_happy_path(patched_shows_db: dict) -> None:
+    game = games.start_show_game(
+        chat_id=1, num_questions=3, starter_id=42, popularity="easy"
+    )
+    assert game.kind is games.GameKind.SHOW
+    assert game.total == 3
+    for q in game.questions:
+        assert q.prompt == "Что за сериал?"
+        assert len(q.options) == 4
+        assert len(set(q.options)) == 4
+        assert q.image_bytes is not None
+        assert q.image_bytes.startswith(b"show-frame-")
+    assert patched_shows_db["max_rank"] == 100
+
+
+def test_start_show_game_pool_size_by_popularity(patched_shows_db: dict) -> None:
+    games.start_show_game(chat_id=1, num_questions=1, starter_id=1, popularity="hard")
+    assert patched_shows_db["max_rank"] == 1000
+
+
+def test_start_show_game_already_running(patched_shows_db: dict) -> None:
+    games.start_show_game(chat_id=1, num_questions=1, starter_id=1, popularity="easy")
+    with pytest.raises(games.GameAlreadyRunning):
+        games.start_show_game(chat_id=1, num_questions=1, starter_id=1, popularity="easy")
+
+
+def test_start_show_game_invalid_popularity(patched_shows_db: dict) -> None:
+    with pytest.raises(ValueError):
+        games.start_show_game(chat_id=1, num_questions=1, starter_id=1, popularity="bogus")
+
+
+def test_start_show_game_raises_when_num_exceeds_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    games.reset_state()
+
+    def fake_load_pool(max_rank: int) -> list[Show]:
+        return list(FAKE_SHOWS[:5])
+
+    monkeypatch.setattr(games.shows_db, "load_pool", fake_load_pool)
+    monkeypatch.setattr(games.shows_db, "get_random_frame", lambda sid: b"x")
+
+    with pytest.raises(games.NotEnoughItems):
+        games.start_show_game(
+            chat_id=1, num_questions=10, starter_id=1, popularity="easy"
+        )

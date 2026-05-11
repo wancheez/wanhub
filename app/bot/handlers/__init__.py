@@ -1,6 +1,6 @@
 from aiogram import Dispatcher
 
-from app.bot.handlers import admin, chat, device, games, movie, start, telemt, trivia
+from app.bot.handlers import admin, chat, device, games, movie, show, start, telemt, trivia
 from app.bot.handlers import ascii as ascii_handlers
 
 
@@ -13,4 +13,5 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(games.router)
     dp.include_router(trivia.router)  # /quiz + tr:* wizard callbacks
     dp.include_router(movie.router)  # /movie + mv:* wizard callbacks
+    dp.include_router(show.router)  # /show + sh:* wizard callbacks
     dp.include_router(chat.router)  # last — has the catch-all on plain text

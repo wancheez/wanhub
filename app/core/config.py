@@ -77,6 +77,10 @@ MOVIE_MAX_QUESTIONS: int = 20
 # понятную ошибку, остальные игры работают.
 MOVIES_DB_PATH: Path = PROJECT_ROOT / "data" / "movies.sqlite3"
 
+# Аналогичная база для сериалов (/show). Заполняется тем же скриптом
+# с `--kind tv` и пишет в `shows.sqlite3`.
+SHOWS_DB_PATH: Path = PROJECT_ROOT / "data" / "shows.sqlite3"
+
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
 

@@ -18,9 +18,10 @@ from datetime import datetime
 from enum import Enum
 from html import escape
 
-from app.services import movies_db
+from app.services import movies_db, shows_db
 from app.services.countries import Country, get_countries
 from app.services.movies_db import MoviesDBUnavailable  # re-exported для удобства хендлера
+from app.services.shows_db import ShowsDBUnavailable  # re-exported для удобства хендлера
 from app.services.trivia import (
     RawTrivia,
     TranslatedTrivia,
@@ -41,6 +42,7 @@ __all__ = [
     "MoviesDBUnavailable",
     "NotEnoughItems",
     "Question",
+    "ShowsDBUnavailable",
     "SubmitResult",
     "TriviaUnavailable",
     "advance",
@@ -53,6 +55,7 @@ __all__ = [
     "start_capital_game",
     "start_flag_game",
     "start_movie_game",
+    "start_show_game",
     "start_trivia_game",
     "submit_answer",
 ]
@@ -63,6 +66,7 @@ class GameKind(Enum):
     CAPITAL = "capital"
     TRIVIA = "trivia"
     MOVIE = "movie"
+    SHOW = "show"
 
 
 @dataclass(frozen=True)
@@ -255,7 +259,7 @@ def start_movie_game(
             # битый вопрос.
             log.error("movie: no frames for id=%d (%r) in DB", movie.id, movie.title)
             raise NotEnoughItems()
-        questions.append(_build_movie_question(movie, pool, frame_bytes))
+        questions.append(_build_media_question(movie, pool, frame_bytes, "Что за фильм?"))
 
     elapsed = time.monotonic() - t_start
     total_kb = sum(len(q.image_bytes or b"") for q in questions) // 1024
@@ -270,37 +274,104 @@ def start_movie_game(
     return _register(chat_id, GameKind.MOVIE, starter_id, questions)
 
 
-def _build_movie_question(
-    correct: movies_db.Movie,
-    pool: list[movies_db.Movie],
+def _build_media_question(
+    correct: movies_db.Movie | shows_db.Show,
+    pool: list[movies_db.Movie] | list[shows_db.Show],
     frame_bytes: bytes,
+    prompt: str,
 ) -> Question:
-    """Собрать Question для фильма + 3 distractor'а из пула.
+    """Собрать Question для медиа-сущности + 3 distractor'а из пула.
 
-    Защита от одинаковых лейблов на кнопках:
-      1. Из пула исключаем все фильмы с тем же title, что у correct.
+    Movie и Show структурно одинаковы (id/title/original_title/release_year/
+    rank). Логика одна. Защита от одинаковых лейблов:
+      1. Из пула исключаем все элементы с тем же title, что у correct.
       2. Среди оставшихся берём по одному «представителю» на каждый
-         уникальный title (вторые копии-омонимы просто не попадают
-         в выборку). Скрипт-фетч уже дедупит, но это страховка от ручных
-         правок БД и сделанная-в-будущем «несезонная» нагрузка.
+         уникальный title. Дедуп уже сделан скриптом-фетчем, но это
+         страховка от ручных правок БД.
     """
     seen = {correct.title}
-    others: list[movies_db.Movie] = []
+    # Используем object-список: dataclass-инстансы хешируемы (frozen=True),
+    # но конкретный тип в каждом случае один из двух — mypy с union list'а
+    # не справляется на random.sample/spread.
+    others: list[object] = []
     for m in pool:
         if m.title in seen:
             continue
         others.append(m)
         seen.add(m.title)
     distractors = random.sample(others, 3)
-    opts = [correct, *distractors]
+    opts: list[object] = [correct, *distractors]
     random.shuffle(opts)
     correct_idx = opts.index(correct)
     return Question(
-        prompt="Что за фильм?",
-        options=tuple(escape(m.title) for m in opts),  # type: ignore[arg-type]
+        prompt=prompt,
+        # opts на самом деле list[Movie] либо list[Show]; mypy не выводит
+        # тип из spread'а union-параметров, поэтому пришлось расширить до
+        # object. Доступ к .title безопасен — оба dataclass'а его имеют.
+        options=tuple(escape(m.title) for m in opts),  # type: ignore[attr-defined]
         correct_idx=correct_idx,
         image_bytes=frame_bytes,
     )
+
+
+# Размеры пулов общие — структура «3 тира» одинакова и для /movie, и для /show.
+SHOW_POOL_SIZES: dict[str, int] = MOVIE_POOL_SIZES
+
+
+def start_show_game(
+    chat_id: int,
+    num_questions: int,
+    starter_id: int,
+    *,
+    popularity: str,
+) -> Game:
+    """Игра «угадай сериал по кадру» из локальной SQLite-базы.
+
+    Зеркало `start_movie_game`, но читает `shows_db` вместо `movies_db`.
+    """
+    if chat_id in _games:
+        raise GameAlreadyRunning()
+    if popularity not in SHOW_POOL_SIZES:
+        raise ValueError(f"unknown popularity={popularity!r}")
+
+    pool_size = SHOW_POOL_SIZES[popularity]
+    t_start = time.monotonic()
+
+    pool = shows_db.load_pool(pool_size)
+    if len(pool) < 4:
+        log.warning("show: pool too small for chat=%d: %d shows", chat_id, len(pool))
+        raise NotEnoughItems()
+    if len(pool) < num_questions:
+        raise NotEnoughItems()
+
+    log.info(
+        "show: starting chat=%d, num=%d, popularity=%s (pool=%d available)",
+        chat_id,
+        num_questions,
+        popularity,
+        len(pool),
+    )
+
+    correct_picks = random.sample(pool, num_questions)
+    questions: list[Question] = []
+    for show in correct_picks:
+        frame_bytes = shows_db.get_random_frame(show.id)
+        if frame_bytes is None:
+            log.error("show: no frames for id=%d (%r) in DB", show.id, show.title)
+            raise NotEnoughItems()
+        questions.append(_build_media_question(show, pool, frame_bytes, "Что за сериал?"))
+
+    elapsed = time.monotonic() - t_start
+    total_kb = sum(len(q.image_bytes or b"") for q in questions) // 1024
+    log.info(
+        "show: game ready for chat=%d in %.2fs (%d questions, %d KB total)",
+        chat_id,
+        elapsed,
+        len(questions),
+        total_kb,
+    )
+
+    return _register(chat_id, GameKind.SHOW, starter_id, questions)
 
 
 def _register(chat_id: int, kind: GameKind, starter_id: int, questions: list[Question]) -> Game:
