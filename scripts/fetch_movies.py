@@ -5,8 +5,11 @@
     poetry run python scripts/fetch_movies.py
     poetry run python scripts/fetch_movies.py --limit 500 --frames-per-movie 3
 
-    # сериалы → data/shows.sqlite3
+    # сериалы → data/shows.sqlite3 (аниме отфильтровано по умолчанию)
     poetry run python scripts/fetch_movies.py --kind tv
+
+    # сериалы с аниме (Frieren, One Piece, и т.п.)
+    poetry run python scripts/fetch_movies.py --kind tv --include-anime
 
 Что делает:
   1. Тянет страницами /{kind}/top_rated?language=ru-RU до набора `--limit`
@@ -159,16 +162,27 @@ async def _process_item(
     return out
 
 
-async def _run(kind: str, limit: int, frames_per_movie: int, out_path: Path) -> int:
+async def _run(
+    kind: str,
+    limit: int,
+    frames_per_movie: int,
+    out_path: Path,
+    exclude_anime: bool,
+) -> int:
     cfg = _KIND_CONFIG[kind]
     table = str(cfg["table"])
     fk_column = str(cfg["fk_column"])
     label = "movies" if kind == "movie" else "shows"
 
-    log.info("fetching up to %d top-rated %s (ru-RU) …", limit, label)
+    log.info(
+        "fetching up to %d top-rated %s (ru-RU%s) …",
+        limit,
+        label,
+        ", no-anime" if exclude_anime else "",
+    )
     t0 = time.monotonic()
     try:
-        items = await tmdb.fetch_top_rated(kind, limit)
+        items = await tmdb.fetch_top_rated(kind, limit, exclude_anime=exclude_anime)
     except tmdb.TMDBUnavailable as e:
         log.error("TMDB unreachable: %s", e)
         return 1
@@ -313,12 +327,24 @@ def main() -> int:
         help=f"путь к SQLite-файлу (default: {MOVIES_DB_PATH} для movie, "
         f"{SHOWS_DB_PATH} для tv)",
     )
+    p.add_argument(
+        "--include-anime",
+        action="store_true",
+        help="для --kind tv: НЕ исключать аниме (по умолчанию аниме отбрасываются)",
+    )
     args = p.parse_args()
     out_path: Path = args.out or _KIND_CONFIG[args.kind]["default_path"]  # type: ignore[assignment]
+    # Для tv по умолчанию выкидываем аниме (большая доля /tv/top_rated —
+    # Frieren, One Piece и т.п., а игроки часто их не знают). Для movie
+    # ничего не выкидываем — японская анимация (Миядзаки) считается
+    # важной частью канона.
+    exclude_anime = args.kind == "tv" and not args.include_anime
     # TMDB_BACKDROP_SIZE — справочно (бот его не использует, но чтобы линт
     # видел импорт нужным; реально качаем w1280 для лучшего качества кропа).
     log.debug("runtime backdrop size: %s; fetch size: %s", TMDB_BACKDROP_SIZE, DOWNLOAD_SIZE)
-    return asyncio.run(_run(args.kind, args.limit, args.frames_per_movie, out_path))
+    return asyncio.run(
+        _run(args.kind, args.limit, args.frames_per_movie, out_path, exclude_anime)
+    )
 
 
 if __name__ == "__main__":

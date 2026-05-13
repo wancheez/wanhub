@@ -520,9 +520,7 @@ def patched_shows_db(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 def test_start_show_game_happy_path(patched_shows_db: dict) -> None:
-    game = games.start_show_game(
-        chat_id=1, num_questions=3, starter_id=42, popularity="easy"
-    )
+    game = games.start_show_game(chat_id=1, num_questions=3, starter_id=42, popularity="easy")
     assert game.kind is games.GameKind.SHOW
     assert game.total == 3
     for q in game.questions:
@@ -562,6 +560,4 @@ def test_start_show_game_raises_when_num_exceeds_pool(
     monkeypatch.setattr(games.shows_db, "get_random_frame", lambda sid: b"x")
 
     with pytest.raises(games.NotEnoughItems):
-        games.start_show_game(
-            chat_id=1, num_questions=10, starter_id=1, popularity="easy"
-        )
+        games.start_show_game(chat_id=1, num_questions=10, starter_id=1, popularity="easy")

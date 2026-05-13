@@ -105,6 +105,19 @@ _KIND_FIELDS: dict[str, tuple[str, str, str]] = {
     "tv": ("name", "original_name", "first_air_date"),
 }
 
+# TMDB genre id 16 = «Animation». Аниме определяем как японскую анимацию:
+# original_language == "ja" + жанр 16. Этот критерий ловит Frieren, One Piece,
+# Атаку титанов; не ловит Avatar: Last Airbender (en, animation, не аниме) и
+# японские дорамы (ja, не animation).
+_ANIMATION_GENRE_ID = 16
+
+
+def _is_anime(item: dict[str, Any]) -> bool:
+    if item.get("original_language") != "ja":
+        return False
+    genre_ids = item.get("genre_ids") or []
+    return _ANIMATION_GENRE_ID in genre_ids
+
 
 _TITLE_WS_RE = re.compile(r"\s+")
 
@@ -218,7 +231,11 @@ def _client_kwargs(timeout: float | httpx.Timeout) -> dict[str, Any]:
 
 
 async def _fetch_top_rated_pages(
-    client: httpx.AsyncClient, kind: str, pool_size: int
+    client: httpx.AsyncClient,
+    kind: str,
+    pool_size: int,
+    *,
+    exclude_anime: bool = False,
 ) -> list[Movie]:
     """Постранично собрать `pool_size` элементов из /{kind}/top_rated.
 
@@ -226,6 +243,9 @@ async def _fetch_top_rated_pages(
     на TMDB ранжируется по «горячести прямо сейчас» (клики/просмотры),
     поэтому в топ лезут непремьеры и анонсы — для игры на узнавание это
     плохо. top_rated ранжируется по средней оценке зрителей и стабилен.
+
+    `exclude_anime=True` отбраковывает японскую анимацию (`ja` +
+    жанр 16) — у пользователей часто запрос «без аниме».
 
     TMDB отдаёт 20 элементов на страницу. Фильтруем 18+ и записи без
     backdrop_path (без кадра играть нельзя).
@@ -258,6 +278,13 @@ async def _fetch_top_rated_pages(
                 continue
             backdrop = item.get("backdrop_path")
             if not backdrop:
+                continue
+            if exclude_anime and _is_anime(item):
+                log.info(
+                    "tmdb: skipping %s id=%s — anime (ja+animation)",
+                    kind,
+                    item.get("id"),
+                )
                 continue
             ru_title = _sanitize_title(item.get(title_field) or "")
             orig_title = _sanitize_title(item.get(orig_field) or "")
@@ -295,24 +322,31 @@ async def _fetch_top_rated_pages(
     return out
 
 
-async def fetch_top_rated(kind: str, pool_size: int) -> list[Movie]:
+async def fetch_top_rated(kind: str, pool_size: int, *, exclude_anime: bool = False) -> list[Movie]:
     """Получить топ-N высокорейтинговых фильмов или сериалов (по `kind`).
 
-    Кеш на каждый kind свой, TTL 6ч. Для меньшего pool_size отдаём префикс
-    уже закешированной большей выдачи.
+    Кеш на каждый (kind, exclude_anime) свой, TTL 6ч. Для меньшего
+    pool_size отдаём префикс уже закешированной большей выдачи.
     """
     now = time.monotonic()
-    cached = _pool_cache.get(kind)
+    cache_key = f"{kind}:noanime" if exclude_anime else kind
+    cached = _pool_cache.get(cache_key)
     if cached is not None:
         ts, items = cached
         if (now - ts) < _POOL_TTL_S and len(items) >= pool_size:
             return items[:pool_size]
 
     async with httpx.AsyncClient(**_client_kwargs(TMDB_TIMEOUT_S)) as client:
-        items = await _fetch_top_rated_pages(client, kind, pool_size)
+        items = await _fetch_top_rated_pages(client, kind, pool_size, exclude_anime=exclude_anime)
 
-    _pool_cache[kind] = (now, items)
-    log.info("tmdb: cached %d top-rated %s items (requested %d)", len(items), kind, pool_size)
+    _pool_cache[cache_key] = (now, items)
+    log.info(
+        "tmdb: cached %d top-rated %s items (requested %d, exclude_anime=%s)",
+        len(items),
+        kind,
+        pool_size,
+        exclude_anime,
+    )
     return items[:pool_size]
 
 

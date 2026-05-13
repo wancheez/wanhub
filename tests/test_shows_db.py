@@ -104,9 +104,7 @@ def test_total_count(populated_db: Path) -> None:
     assert shows_db.total_count() == (3, 6)
 
 
-def test_missing_file_raises_clear_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_file_raises_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shows_db, "SHOWS_DB_PATH", tmp_path / "absent.sqlite3")
     shows_db.reset_cache()
     with pytest.raises(ShowsDBUnavailable, match="--kind tv"):

@@ -37,7 +37,7 @@ _NUM_CHOICES = (3, 5, 10)
 _POPULARITY_BASE_LABELS = {
     "easy": "📺 Известные",
     "medium": "🎞 Менее известные",
-    "hard": "🎬 Для синефилов",
+    "hard": "🎬 Нишевые",
 }
 
 

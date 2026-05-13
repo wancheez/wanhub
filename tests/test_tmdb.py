@@ -29,14 +29,24 @@ def _movie_item(
     adult: bool = False,
     original_title: str = "Test Movie",
     release_date: str = "2024-01-15",
+    original_language: str = "en",
+    genre_ids: list[int] | None = None,
 ) -> dict[str, Any]:
+    # Поля дублируются под обе TMDB-схемы (movie: title/original_title/
+    # release_date; tv: name/original_name/first_air_date). Так один и тот же
+    # хелпер пригоден и для tests/fetch_top_rated("movie"), и для ("tv").
     return {
         "id": mid,
         "title": title,
         "original_title": original_title,
+        "name": title,
+        "original_name": original_title,
         "backdrop_path": backdrop,
         "adult": adult,
         "release_date": release_date,
+        "first_air_date": release_date,
+        "original_language": original_language,
+        "genre_ids": genre_ids or [],
     }
 
 
@@ -240,6 +250,117 @@ def test_is_user_readable_helper() -> None:
     # Пустая строка теперь читаема (нет alpha-символов вообще). Реальный
     # фильтр в _fetch_popular_pages отдельно требует не-пусто + кириллицу.
     assert tmdb._is_user_readable("")
+
+
+# ---------- anime filter -----------------------------------------------------
+
+
+def test_is_anime_detects_japanese_animation() -> None:
+    assert tmdb._is_anime({"original_language": "ja", "genre_ids": [16, 10765]})
+
+
+def test_is_anime_rejects_non_japanese_animation() -> None:
+    # Avatar: Last Airbender — английский, мульт-сериал, но не аниме
+    assert not tmdb._is_anime({"original_language": "en", "genre_ids": [16]})
+
+
+def test_is_anime_rejects_japanese_live_action() -> None:
+    # Японская дорама без жанра 16 — не аниме
+    assert not tmdb._is_anime({"original_language": "ja", "genre_ids": [18]})
+
+
+def test_is_anime_handles_missing_fields() -> None:
+    assert not tmdb._is_anime({})
+
+
+def test_fetch_top_rated_excludes_anime_when_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_client(
+        monkeypatch,
+        responses=[
+            _popular_payload(
+                [
+                    _movie_item(
+                        1,
+                        title="Атака титанов",
+                        original_language="ja",
+                        genre_ids=[16, 10765],
+                    ),
+                    _movie_item(
+                        2,
+                        title="Во все тяжкие",
+                        original_language="en",
+                        genre_ids=[18, 80],
+                    ),
+                    _movie_item(
+                        3,
+                        title="Аватар: Легенда об Аанге",
+                        original_language="en",
+                        genre_ids=[16],  # animation but not anime
+                    ),
+                ]
+            ),
+        ],
+    )
+    out = asyncio.run(tmdb.fetch_top_rated("tv", 10, exclude_anime=True))
+    titles = [m.title for m in out]
+    assert titles == ["Во все тяжкие", "Аватар: Легенда об Аанге"]
+
+
+def test_fetch_top_rated_keeps_anime_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_client(
+        monkeypatch,
+        responses=[
+            _popular_payload(
+                [
+                    _movie_item(
+                        1,
+                        title="Атака титанов",
+                        original_language="ja",
+                        genre_ids=[16],
+                    ),
+                ]
+            ),
+        ],
+    )
+    out = asyncio.run(tmdb.fetch_top_rated("tv", 10))
+    assert [m.title for m in out] == ["Атака титанов"]
+
+
+def test_fetch_top_rated_anime_cache_separate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """exclude_anime=True и False кешируются отдельно (разные результаты)."""
+    fake = _patch_client(
+        monkeypatch,
+        responses=[
+            _popular_payload(
+                [
+                    _movie_item(
+                        1,
+                        title="Аниме",
+                        original_language="ja",
+                        genre_ids=[16],
+                    ),
+                    _movie_item(2, title="Фильм"),
+                ]
+            ),
+            # Второй вызов с другим флагом — должен сходить в сеть ещё раз
+            _popular_payload(
+                [
+                    _movie_item(
+                        1,
+                        title="Аниме",
+                        original_language="ja",
+                        genre_ids=[16],
+                    ),
+                    _movie_item(2, title="Фильм"),
+                ]
+            ),
+        ],
+    )
+    out_with = asyncio.run(tmdb.fetch_top_rated("tv", 10))
+    out_without = asyncio.run(tmdb.fetch_top_rated("tv", 10, exclude_anime=True))
+    assert [m.title for m in out_with] == ["Аниме", "Фильм"]
+    assert [m.title for m in out_without] == ["Фильм"]
+    assert len(fake.calls) == 2  # оба раза в сеть
 
 
 def test_has_cyrillic_helper() -> None:
