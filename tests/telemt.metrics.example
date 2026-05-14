@@ -13,6 +13,12 @@ telemt_connections_bad_total 4
 # HELP telemt_handshake_timeouts_total Client handshake timeouts
 # TYPE telemt_handshake_timeouts_total counter
 telemt_handshake_timeouts_total 1
+# HELP telemt_auth_expensive_checks_total Expensive authentication candidate checks
+# TYPE telemt_auth_expensive_checks_total counter
+telemt_auth_expensive_checks_total 117
+# HELP telemt_auth_budget_exhausted_total Auth budget exhausted events
+# TYPE telemt_auth_budget_exhausted_total counter
+telemt_auth_budget_exhausted_total 0
 # HELP telemt_upstream_connect_attempt_total Upstream dial attempts
 # TYPE telemt_upstream_connect_attempt_total counter
 telemt_upstream_connect_attempt_total 472
@@ -22,6 +28,27 @@ telemt_upstream_connect_success_total 470
 # HELP telemt_upstream_connect_fail_total Upstream dials that failed
 # TYPE telemt_upstream_connect_fail_total counter
 telemt_upstream_connect_fail_total 2
+# HELP telemt_upstream_connect_duration_success_total Histogram buckets of success duration
+# TYPE telemt_upstream_connect_duration_success_total counter
+telemt_upstream_connect_duration_success_total{bucket="le_100ms"} 300
+telemt_upstream_connect_duration_success_total{bucket="101_500ms"} 160
+telemt_upstream_connect_duration_success_total{bucket="501_1000ms"} 10
+telemt_upstream_connect_duration_success_total{bucket="gt_1000ms"} 0
+# HELP telemt_upstream_connect_duration_fail_total Histogram buckets of fail duration
+# TYPE telemt_upstream_connect_duration_fail_total counter
+telemt_upstream_connect_duration_fail_total{bucket="le_100ms"} 0
+telemt_upstream_connect_duration_fail_total{bucket="101_500ms"} 0
+telemt_upstream_connect_duration_fail_total{bucket="501_1000ms"} 0
+telemt_upstream_connect_duration_fail_total{bucket="gt_1000ms"} 2
+# HELP telemt_me_d2c_batches_total Total DC->Client flush batches
+# TYPE telemt_me_d2c_batches_total counter
+telemt_me_d2c_batches_total 1024
+# HELP telemt_me_d2c_batch_frames_total Total DC->Client frames flushed
+# TYPE telemt_me_d2c_batch_frames_total counter
+telemt_me_d2c_batch_frames_total 2048
+# HELP telemt_me_d2c_batch_bytes_total Total DC->Client bytes flushed
+# TYPE telemt_me_d2c_batch_bytes_total counter
+telemt_me_d2c_batch_bytes_total 13214792
 # HELP telemt_me_writers_active_current Active middleware writers
 # TYPE telemt_me_writers_active_current gauge
 telemt_me_writers_active_current 44
@@ -46,6 +73,27 @@ telemt_me_endpoint_quarantine_total 7
 # HELP telemt_me_endpoint_quarantine_unexpected_total Unexpected quarantines
 # TYPE telemt_me_endpoint_quarantine_unexpected_total counter
 telemt_me_endpoint_quarantine_unexpected_total 5
+# HELP telemt_me_single_endpoint_shadow_rotate_total Shadow rotations
+# TYPE telemt_me_single_endpoint_shadow_rotate_total counter
+telemt_me_single_endpoint_shadow_rotate_total 12
+# HELP telemt_me_writer_pick_total Writer pick outcomes
+# TYPE telemt_me_writer_pick_total counter
+telemt_me_writer_pick_total{mode="sorted_rr",result="success_try"} 0
+telemt_me_writer_pick_total{mode="p2c",result="success_try"} 87
+telemt_me_writer_pick_total{mode="p2c",result="full"} 0
+# HELP telemt_me_floor_mode Runtime floor policy mode
+# TYPE telemt_me_floor_mode gauge
+telemt_me_floor_mode{mode="static"} 0
+telemt_me_floor_mode{mode="adaptive"} 1
+# HELP telemt_me_fair_active_flows Fair scheduler active flow count
+# TYPE telemt_me_fair_active_flows gauge
+telemt_me_fair_active_flows 3
+# HELP telemt_me_fair_queued_bytes Fair scheduler queued bytes
+# TYPE telemt_me_fair_queued_bytes gauge
+telemt_me_fair_queued_bytes 8192
+# HELP telemt_me_fair_pressure_state Fair scheduler pressure state
+# TYPE telemt_me_fair_pressure_state gauge
+telemt_me_fair_pressure_state 0
 # HELP telemt_desync_total Desync events
 # TYPE telemt_desync_total counter
 telemt_desync_total 0
@@ -69,6 +117,38 @@ telemt_me_route_drop_queue_full_total 0
 telemt_buffer_pool_buffers_total{kind="pooled"} 11
 telemt_buffer_pool_buffers_total{kind="allocated"} 11
 telemt_buffer_pool_buffers_total{kind="in_use"} 0
+# HELP telemt_tls_front_profile_info TLS front profile flags per domain
+# TYPE telemt_tls_front_profile_info gauge
+telemt_tls_front_profile_info{domain="okko.tv",source="merged"} 1
+telemt_tls_front_profile_info{domain="example.com",source="static"} 1
+# HELP telemt_tls_front_profile_age_seconds Age of cached TLS front profile
+# TYPE telemt_tls_front_profile_age_seconds gauge
+telemt_tls_front_profile_age_seconds{domain="okko.tv"} 48
+telemt_tls_front_profile_age_seconds{domain="example.com"} 130
+# HELP telemt_tls_front_profile_app_data_records App-data record count
+# TYPE telemt_tls_front_profile_app_data_records gauge
+telemt_tls_front_profile_app_data_records{domain="okko.tv"} 3
+telemt_tls_front_profile_app_data_records{domain="example.com"} 5
+# HELP telemt_tls_front_profile_ticket_records Ticket-like tail records
+# TYPE telemt_tls_front_profile_ticket_records gauge
+telemt_tls_front_profile_ticket_records{domain="okko.tv"} 1
+telemt_tls_front_profile_ticket_records{domain="example.com"} 2
+# HELP telemt_tls_front_profile_app_data_bytes App-data total bytes
+# TYPE telemt_tls_front_profile_app_data_bytes gauge
+telemt_tls_front_profile_app_data_bytes{domain="okko.tv"} 5727
+telemt_tls_front_profile_app_data_bytes{domain="example.com"} 9001
+# HELP telemt_ip_tracker_users Number of users tracked by IP limiter
+# TYPE telemt_ip_tracker_users gauge
+telemt_ip_tracker_users{scope="active"} 2
+telemt_ip_tracker_users{scope="recent"} 4
+# HELP telemt_ip_tracker_entries Number of IP entries tracked
+# TYPE telemt_ip_tracker_entries gauge
+telemt_ip_tracker_entries{scope="active"} 5
+telemt_ip_tracker_entries{scope="recent"} 9
+# HELP telemt_ip_tracker_cap_rejects_total IP tracker cap rejects
+# TYPE telemt_ip_tracker_cap_rejects_total counter
+telemt_ip_tracker_cap_rejects_total{scope="active"} 1
+telemt_ip_tracker_cap_rejects_total{scope="recent"} 3
 # HELP telemt_user_connections_current Per-user current connections
 # TYPE telemt_user_connections_current gauge
 telemt_user_connections_current{user="hello"} 11

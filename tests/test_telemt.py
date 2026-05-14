@@ -58,6 +58,59 @@ def test_snapshot_extracts_curated_fields(metrics_text: str) -> None:
     assert s.desync_total == 0
 
 
+def test_snapshot_traffic_and_auth(metrics_text: str) -> None:
+    s = build_snapshot(metrics_text)
+    assert s.auth_expensive_checks_total == 117
+    assert s.auth_budget_exhausted_total == 0
+    assert s.d2c_batch_bytes_total == 13214792
+    assert s.d2c_batches_total == 1024
+    assert s.d2c_batch_frames_total == 2048
+
+
+def test_snapshot_upstream_duration_buckets(metrics_text: str) -> None:
+    s = build_snapshot(metrics_text)
+    assert s.upstream_connect_duration_success == {
+        "le_100ms": 300,
+        "101_500ms": 160,
+        "501_1000ms": 10,
+        "gt_1000ms": 0,
+    }
+    # Insertion order from Prometheus dump must be preserved.
+    assert next(iter(s.upstream_connect_duration_success.keys())) == "le_100ms"
+    assert s.upstream_connect_duration_fail["gt_1000ms"] == 2
+
+
+def test_snapshot_me_pool_modes_and_fair(metrics_text: str) -> None:
+    s = build_snapshot(metrics_text)
+    assert s.me_floor_mode == "adaptive"
+    assert s.me_writer_pick_mode == "p2c"
+    assert s.me_shadow_rotate_total == 12
+    assert s.me_fair_active_flows == 3
+    assert s.me_fair_queued_bytes == 8192
+    assert s.me_fair_pressure_state == 0
+
+
+def test_snapshot_tls_profiles(metrics_text: str) -> None:
+    s = build_snapshot(metrics_text)
+    domains = [p.domain for p in s.tls_profiles]
+    assert domains == ["example.com", "okko.tv"]
+    okko = next(p for p in s.tls_profiles if p.domain == "okko.tv")
+    assert okko.age_seconds == 48
+    assert okko.app_data_records == 3
+    assert okko.app_data_bytes == 5727
+    assert okko.ticket_records == 1
+
+
+def test_snapshot_ip_tracker(metrics_text: str) -> None:
+    s = build_snapshot(metrics_text)
+    assert s.ip_tracker.users_active == 2
+    assert s.ip_tracker.users_recent == 4
+    assert s.ip_tracker.entries_active == 5
+    assert s.ip_tracker.entries_recent == 9
+    assert s.ip_tracker.cap_rejects_active == 1
+    assert s.ip_tracker.cap_rejects_recent == 3
+
+
 def test_snapshot_users(metrics_text: str) -> None:
     s = build_snapshot(metrics_text)
     assert len(s.users) == 1
