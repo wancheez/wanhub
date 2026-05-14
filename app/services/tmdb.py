@@ -14,7 +14,6 @@
 
 import asyncio
 import logging
-import math
 import random
 import re
 import time
@@ -60,6 +59,25 @@ class CropLevel(Enum):
         self.fraction = fraction
 
 
+class PoolSource(Enum):
+    """Источник пула фильмов/сериалов для наполнения квиза.
+
+    TOP_RATED — `/{kind}/top_rated`. TMDB сортирует по средней оценке
+      зрителей с собственным скрытым порогом по числу голосов. Крен в
+      «классику по рейтингу»: критически высокие тайтлы наверху, узнаваемость
+      не учитывается (Список Шиндлера выше Аватара). Хорошо для medium/hard.
+
+    MOST_VOTED — `/discover/{kind}?sort_by=vote_count.desc`. Сортировка по
+      количеству пользовательских голосов TMDB — прямой прокси «много людей
+      видели». Поддерживает фильтры `vote_count.gte` (порог известности) и
+      `vote_average.gte` (отсечь явный шлак). Хорошо для easy-режима, где
+      ожидается «должны узнать все».
+    """
+
+    TOP_RATED = "top_rated"
+    MOST_VOTED = "most_voted"
+
+
 @dataclass(frozen=True)
 class Movie:
     """Карточка фильма для игрового пула.
@@ -92,6 +110,10 @@ class FrameMedia:
 # HTTP 429 в редких случаях. Один retry со sleep'ом достаточно.
 _RATE_LIMIT_RETRY_S = 1.0
 _POOL_TTL_S = 6 * 3600  # 6 часов: TMDB-популярность обновляется не чаще
+# TMDB кэпит /discover на 500 страниц (×20 элементов = 10k); top_rated
+# обычно <1000. Предохранитель от бесконечного цикла, если total_pages
+# по какой-то причине не пришёл.
+_MAX_TMDB_PAGES = 500
 
 # Кеш на каждый тип медиа отдельно ("movie" → top-rated фильмы,
 # "tv" → top-rated сериалы). Запрашиваем разные endpoint'ы, разные
@@ -230,46 +252,94 @@ def _client_kwargs(timeout: float | httpx.Timeout) -> dict[str, Any]:
     return kwargs
 
 
-async def _fetch_top_rated_pages(
+def _source_request(
+    kind: str,
+    source: PoolSource,
+    *,
+    min_vote_count: int | None,
+    min_vote_average: float | None,
+) -> tuple[str, dict[str, Any]]:
+    """Endpoint + специфичные для источника query-параметры.
+
+    Для TOP_RATED это просто `/{kind}/top_rated` без доп. фильтров — TMDB
+    сам применяет внутренний порог голосов. Для MOST_VOTED это
+    `/discover/{kind}` с `sort_by=vote_count.desc` и опциональными порогами
+    `vote_count.gte` / `vote_average.gte`.
+
+    Пороги допустимы только в MOST_VOTED: top_rated их не понимает, и
+    тихо игнорировать опасно — лучше упасть в caller'е.
+    """
+    if source is PoolSource.TOP_RATED:
+        if min_vote_count is not None or min_vote_average is not None:
+            raise ValueError(
+                "min_vote_count/min_vote_average доступны только для PoolSource.MOST_VOTED"
+            )
+        return f"{TMDB_API_URL}/{kind}/top_rated", {}
+    if source is PoolSource.MOST_VOTED:
+        params: dict[str, Any] = {"sort_by": "vote_count.desc"}
+        if min_vote_count is not None:
+            params["vote_count.gte"] = str(min_vote_count)
+        if min_vote_average is not None:
+            # `:g` убирает хвостовые нули у 6.0 → "6"; TMDB парсит и то и то.
+            params["vote_average.gte"] = f"{min_vote_average:g}"
+        return f"{TMDB_API_URL}/discover/{kind}", params
+    raise ValueError(f"unknown source={source!r}")
+
+
+async def _fetch_pool_pages(
     client: httpx.AsyncClient,
     kind: str,
     pool_size: int,
     *,
+    source: PoolSource = PoolSource.TOP_RATED,
     exclude_anime: bool = False,
+    min_vote_count: int | None = None,
+    min_vote_average: float | None = None,
 ) -> list[Movie]:
-    """Постранично собрать `pool_size` элементов из /{kind}/top_rated.
+    """Постранично собрать `pool_size` элементов согласно `source`.
 
-    `kind` — "movie" или "tv". Используем top_rated, а не /popular: popular
-    на TMDB ранжируется по «горячести прямо сейчас» (клики/просмотры),
-    поэтому в топ лезут непремьеры и анонсы — для игры на узнавание это
-    плохо. top_rated ранжируется по средней оценке зрителей и стабилен.
+    `kind` — "movie" или "tv". Endpoint и доп. параметры выбираются по
+    `source` (см. `PoolSource`): TOP_RATED — стабильная классика по оценке,
+    MOST_VOTED — по числу голосов с настраиваемыми порогами `vote_count.gte`
+    и `vote_average.gte` (последний прокси узнаваемости).
 
     `exclude_anime=True` отбраковывает японскую анимацию (`ja` +
     жанр 16) — у пользователей часто запрос «без аниме».
 
     TMDB отдаёт 20 элементов на страницу. Фильтруем 18+ и записи без
-    backdrop_path (без кадра играть нельзя).
+    backdrop_path (без кадра играть нельзя). Страницы запрашиваем по одной,
+    пока не наберём `pool_size` валидных кандидатов или TMDB не сообщит,
+    что страницы кончились — старый расчёт `pages_needed = pool_size/20`
+    систематически недобирал, потому что фильтры (cyrillic title + др.)
+    выбрасывают часть выдачи.
     """
     if kind not in _KIND_FIELDS:
         raise ValueError(f"unknown kind={kind!r}")
     title_field, orig_field, date_field = _KIND_FIELDS[kind]
+    endpoint, source_params = _source_request(
+        kind,
+        source,
+        min_vote_count=min_vote_count,
+        min_vote_average=min_vote_average,
+    )
     # TMDB не возвращает adult-флаг для /tv/top_rated (там другая разметка),
     # но для безопасности всегда передаём include_adult=false на movie.
     headers, auth_params = _auth_request_args()
-    pages_needed = max(1, math.ceil(pool_size / 20))
     out: list[Movie] = []
-    for page in range(1, pages_needed + 1):
+    page = 1
+    # Жёсткий предохранитель от бесконечного цикла: TMDB кэпит /discover
+    # на 500 страниц, /top_rated обычно ≤ 1000. Дальше идти смысла нет.
+    while page <= _MAX_TMDB_PAGES:
         params: dict[str, Any] = {
             **auth_params,
+            **source_params,
             "language": "ru-RU",
             "page": page,
         }
         if kind == "movie":
             params["include_adult"] = "false"
         try:
-            data = await _http_get_json(
-                client, f"{TMDB_API_URL}/{kind}/top_rated", params, headers=headers
-            )
+            data = await _http_get_json(client, endpoint, params, headers=headers)
         except httpx.HTTPError as e:
             raise TMDBUnavailable(f"TMDB недоступен: {e}") from e
         results = data.get("results") or []
@@ -288,11 +358,18 @@ async def _fetch_top_rated_pages(
                 continue
             ru_title = _sanitize_title(item.get(title_field) or "")
             orig_title = _sanitize_title(item.get(orig_field) or "")
-            # Требуем именно русский title: хоть один кириллический символ +
-            # все остальные буквы — кириллица/латиница. Без локализации
-            # TMDB кладёт в title оригинал (CJK/тайский/латиница), и такой
-            # фильм игроку без знания языка ничего не даёт — выкидываем.
-            if not (ru_title and _has_cyrillic(ru_title) and _is_user_readable(ru_title)):
+            # Требуем русский title (или универсальный — без букв вообще).
+            # Если букв нет — title language-agnostic: '1+1', '1917', '300'
+            # одинаково читаются на любом языке, скипать их нельзя.
+            # Если буквы есть — хотя бы одна должна быть кириллицей: иначе
+            # это un-localized 'Inception'/'Avatar' (для русского игрока
+            # не подсказка) или CJK ('哪吒') — оба бесполезны.
+            has_alpha = any(ch.isalpha() for ch in ru_title)
+            if (
+                not ru_title
+                or (has_alpha and not _has_cyrillic(ru_title))
+                or not _is_user_readable(ru_title)
+            ):
                 log.info(
                     "tmdb: skipping %s id=%s — no russian title (ru=%r, orig=%r)",
                     kind,
@@ -315,21 +392,40 @@ async def _fetch_top_rated_pages(
             )
             if len(out) >= pool_size:
                 return out
-        # Если TMDB вернул меньше страниц, чем мы просили — выходим.
+        # TMDB сообщил, что страницы кончились — больше тянуть нечего.
         total_pages = data.get("total_pages")
         if isinstance(total_pages, int) and page >= total_pages:
             break
+        page += 1
+    if len(out) < pool_size:
+        log.warning(
+            "tmdb: only %d/%d candidates found after %d pages (TMDB исчерпан)",
+            len(out),
+            pool_size,
+            page,
+        )
     return out
 
 
-async def fetch_top_rated(kind: str, pool_size: int, *, exclude_anime: bool = False) -> list[Movie]:
-    """Получить топ-N высокорейтинговых фильмов или сериалов (по `kind`).
+async def fetch_pool(
+    kind: str,
+    pool_size: int,
+    *,
+    source: PoolSource = PoolSource.TOP_RATED,
+    exclude_anime: bool = False,
+    min_vote_count: int | None = None,
+    min_vote_average: float | None = None,
+) -> list[Movie]:
+    """Получить пул из `pool_size` фильмов/сериалов по выбранному `source`.
 
-    Кеш на каждый (kind, exclude_anime) свой, TTL 6ч. Для меньшего
-    pool_size отдаём префикс уже закешированной большей выдачи.
+    Параметры порогов применимы только к `PoolSource.MOST_VOTED` (см.
+    `_source_request`). TTL кеша — 6ч; ключ кеша включает все параметры,
+    чтобы разные стратегии/пороги не путались.
     """
     now = time.monotonic()
-    cache_key = f"{kind}:noanime" if exclude_anime else kind
+    cache_key = (
+        f"{kind}|{source.value}|vc={min_vote_count}|va={min_vote_average}|noanime={exclude_anime}"
+    )
     cached = _pool_cache.get(cache_key)
     if cached is not None:
         ts, items = cached
@@ -337,17 +433,35 @@ async def fetch_top_rated(kind: str, pool_size: int, *, exclude_anime: bool = Fa
             return items[:pool_size]
 
     async with httpx.AsyncClient(**_client_kwargs(TMDB_TIMEOUT_S)) as client:
-        items = await _fetch_top_rated_pages(client, kind, pool_size, exclude_anime=exclude_anime)
+        items = await _fetch_pool_pages(
+            client,
+            kind,
+            pool_size,
+            source=source,
+            exclude_anime=exclude_anime,
+            min_vote_count=min_vote_count,
+            min_vote_average=min_vote_average,
+        )
 
     _pool_cache[cache_key] = (now, items)
     log.info(
-        "tmdb: cached %d top-rated %s items (requested %d, exclude_anime=%s)",
+        "tmdb: cached %d %s/%s items (requested %d, vc>=%s, va>=%s, exclude_anime=%s)",
         len(items),
+        source.value,
         kind,
         pool_size,
+        min_vote_count,
+        min_vote_average,
         exclude_anime,
     )
     return items[:pool_size]
+
+
+async def fetch_top_rated(kind: str, pool_size: int, *, exclude_anime: bool = False) -> list[Movie]:
+    """Backward-compat обёртка над `fetch_pool` с `source=TOP_RATED`."""
+    return await fetch_pool(
+        kind, pool_size, source=PoolSource.TOP_RATED, exclude_anime=exclude_anime
+    )
 
 
 async def fetch_top_rated_movies(pool_size: int) -> list[Movie]:

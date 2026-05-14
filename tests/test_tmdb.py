@@ -164,7 +164,11 @@ def test_fetch_popular_filters_adult_and_no_backdrop(monkeypatch: pytest.MonkeyP
 
 
 def test_fetch_popular_requires_cyrillic_title(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Без кириллицы в title — пропускаем, даже если оригинал в латинице."""
+    """Без кириллицы в title — пропускаем, даже если оригинал в латинице.
+
+    Исключение: title без алфавитных символов вообще ('1+1', '1917', '300')
+    — это language-agnostic название, такие фильмы пропускать нельзя.
+    """
     _patch_client(
         monkeypatch,
         responses=[
@@ -183,13 +187,20 @@ def test_fetch_popular_requires_cyrillic_title(monkeypatch: pytest.MonkeyPatch) 
                     # нормальный русский title → ОК
                     _movie_item(6, title="Паразиты", original_title="기생충"),
                     _movie_item(7, title="Начало", original_title="Inception"),
+                    # title без букв вообще — language-agnostic, ОК.
+                    # «1+1» (фр. Intouchables) — реальное русское название.
+                    _movie_item(8, title="1+1", original_title="Intouchables"),
+                    # «1917» (en. 1917) — на русском тоже «1917».
+                    _movie_item(9, title="1917", original_title="1917"),
+                    # «300 спартанцев» — title в TMDB иногда просто «300».
+                    _movie_item(10, title="300", original_title="300"),
                 ]
             ),
         ],
     )
     movies = asyncio.run(tmdb.fetch_top_rated_movies(10))
     titles = [m.title for m in movies]
-    assert titles == ["Паразиты", "Начало"]
+    assert titles == ["Паразиты", "Начало", "1+1", "1917", "300"]
 
 
 def test_sanitize_title_strips_zero_width() -> None:
@@ -361,6 +372,96 @@ def test_fetch_top_rated_anime_cache_separate(monkeypatch: pytest.MonkeyPatch) -
     assert [m.title for m in out_with] == ["Аниме", "Фильм"]
     assert [m.title for m in out_without] == ["Фильм"]
     assert len(fake.calls) == 2  # оба раза в сеть
+
+
+# ---------- fetch_pool: PoolSource.MOST_VOTED -------------------------------
+
+
+def test_fetch_pool_most_voted_uses_discover_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MOST_VOTED шлёт на /discover/{kind} с sort_by=vote_count.desc."""
+    fake = _patch_client(
+        monkeypatch,
+        responses=[_popular_payload([_movie_item(1, "Аватар"), _movie_item(2, "Титаник")])],
+    )
+    out = asyncio.run(tmdb.fetch_pool("movie", 2, source=tmdb.PoolSource.MOST_VOTED))
+    assert [m.id for m in out] == [1, 2]
+    url, params = fake.calls[0]
+    assert url.endswith("/discover/movie")
+    assert params["sort_by"] == "vote_count.desc"
+    assert params["language"] == "ru-RU"
+
+
+def test_fetch_pool_most_voted_applies_thresholds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _patch_client(
+        monkeypatch,
+        responses=[_popular_payload([_movie_item(1, "Аватар")])],
+    )
+    asyncio.run(
+        tmdb.fetch_pool(
+            "movie",
+            1,
+            source=tmdb.PoolSource.MOST_VOTED,
+            min_vote_count=1000,
+            min_vote_average=6.0,
+        )
+    )
+    params = fake.calls[0][1]
+    assert params["vote_count.gte"] == "1000"
+    # 6.0 форматируется как "6" через :g — TMDB парсит и то и то
+    assert params["vote_average.gte"] == "6"
+
+
+def test_fetch_pool_top_rated_rejects_thresholds() -> None:
+    """top_rated не принимает фильтры — должны падать явно."""
+    with pytest.raises(ValueError, match="MOST_VOTED"):
+        asyncio.run(
+            tmdb.fetch_pool(
+                "movie",
+                1,
+                source=tmdb.PoolSource.TOP_RATED,
+                min_vote_count=100,
+            )
+        )
+
+
+def test_fetch_pool_cache_separates_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """top_rated и most_voted кешируются отдельно (разные endpoint'ы)."""
+    fake = _patch_client(
+        monkeypatch,
+        responses=[
+            _popular_payload([_movie_item(1, "Из top_rated")]),
+            _popular_payload([_movie_item(2, "Из most_voted")]),
+        ],
+    )
+    a = asyncio.run(tmdb.fetch_pool("movie", 1, source=tmdb.PoolSource.TOP_RATED))
+    b = asyncio.run(tmdb.fetch_pool("movie", 1, source=tmdb.PoolSource.MOST_VOTED))
+    assert a[0].title == "Из top_rated"
+    assert b[0].title == "Из most_voted"
+    assert len(fake.calls) == 2  # обе стратегии — отдельные сетевые вызовы
+
+
+def test_fetch_pool_cache_separates_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Разные min_vote_count → разные кеш-записи (фильтры влияют на выдачу)."""
+    fake = _patch_client(
+        monkeypatch,
+        responses=[
+            _popular_payload([_movie_item(1, "Порог 100")]),
+            _popular_payload([_movie_item(2, "Порог 1000")]),
+        ],
+    )
+    a = asyncio.run(
+        tmdb.fetch_pool("movie", 1, source=tmdb.PoolSource.MOST_VOTED, min_vote_count=100)
+    )
+    b = asyncio.run(
+        tmdb.fetch_pool("movie", 1, source=tmdb.PoolSource.MOST_VOTED, min_vote_count=1000)
+    )
+    assert a[0].title == "Порог 100"
+    assert b[0].title == "Порог 1000"
+    assert len(fake.calls) == 2
 
 
 def test_has_cyrillic_helper() -> None:

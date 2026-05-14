@@ -372,7 +372,7 @@ def test_start_movie_game_happy_path(patched_movies_db: dict) -> None:
         assert q.image_url is None
         assert q.image_bytes is not None
         assert q.image_bytes.startswith(b"frame-")
-    assert patched_movies_db["max_rank"] == 100
+    assert patched_movies_db["max_rank"] == 200
 
 
 def test_start_movie_game_pool_size_by_popularity(patched_movies_db: dict) -> None:
@@ -529,7 +529,7 @@ def test_start_show_game_happy_path(patched_shows_db: dict) -> None:
         assert len(set(q.options)) == 4
         assert q.image_bytes is not None
         assert q.image_bytes.startswith(b"show-frame-")
-    assert patched_shows_db["max_rank"] == 100
+    assert patched_shows_db["max_rank"] == 200
 
 
 def test_start_show_game_pool_size_by_popularity(patched_shows_db: dict) -> None:

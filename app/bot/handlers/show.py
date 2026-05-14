@@ -42,7 +42,7 @@ _POPULARITY_BASE_LABELS = {
 
 
 def _popularity_label(key: str) -> str:
-    """Лейбл кнопки: «📺 Известные · топ-100». Размер из games.SHOW_POOL_SIZES."""
+    """Лейбл кнопки: «📺 Известные · топ-200». Размер из games.SHOW_POOL_SIZES."""
     return f"{_POPULARITY_BASE_LABELS[key]} · топ-{games.SHOW_POOL_SIZES[key]}"
 
 

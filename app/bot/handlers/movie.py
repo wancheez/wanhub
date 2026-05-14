@@ -45,7 +45,7 @@ _POPULARITY_BASE_LABELS = {
 
 
 def _popularity_label(key: str) -> str:
-    """Лейбл кнопки: «🍿 Известные · топ-100».
+    """Лейбл кнопки: «🍿 Известные · топ-200».
 
     Размер пула тянется из games.MOVIE_POOL_SIZES — одна правда на код.
     """
