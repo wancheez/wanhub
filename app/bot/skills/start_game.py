@@ -26,10 +26,11 @@ from app.services import games
 log = logging.getLogger("app")
 
 # Названия игр + любые окончания/падежи: «квиз», «викторину», «флаги», «столицу»,
-# «фильм», «кино», «movie».
+# «фильм», «кино», «movie», «сделку».
 _GAME_NOUN_RE = (
     r"(квиз\w*|викторин\w*|флаг(?:и|ов|ах|ам|у)?|флажк\w*|столиц\w*|"
-    r"фильм\w*|кино|movie|сериал\w*|show|series)"
+    r"фильм\w*|кино|movie|сериал\w*|show|series|"
+    r"сделк\w*|деал\w*|deal)"
 )
 
 # Стартовые глаголы. «давай» допускает дополнительный глагол («давай сыграем»).
@@ -65,6 +66,8 @@ def _resolve_game(word: str) -> str | None:
         return "movie"
     if w.startswith(("сериал", "show", "series")):
         return "show"
+    if w.startswith(("сделк", "деал", "deal")):
+        return "deal"
     return None
 
 
@@ -183,6 +186,14 @@ class StartGameSkill:
                     parse_mode="HTML",
                     reply_markup=_show_num_keyboard(starter_id),
                 )
+            return
+
+        if game_name == "deal":
+            # У /deal число кейсов выбирается кликом из лобби; параметр
+            # `num` из текста игнорируем — он семантически ничего не значит.
+            from app.bot.handlers.deal import start_deal_from_skill
+
+            await start_deal_from_skill(message)
             return
 
         # flags / capitals — единственный параметр (число) либо в тексте, либо дефолт.

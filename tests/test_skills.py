@@ -1,4 +1,5 @@
 from app.bot.skills.send_image import SendImageSkill
+from app.bot.skills.show_dealtop import ShowDealTopSkill, extract_dealtop_intent
 from app.bot.skills.start_game import StartGameSkill, extract_game_intent
 
 
@@ -228,3 +229,87 @@ def test_game_match_serial_with_num():
 
 def test_game_match_serial_inflection():
     assert extract_game_intent("давай сериалы") == {"game": "show", "num": None}
+
+
+def test_game_match_bare_deal_ru():
+    assert extract_game_intent("сделка") == {"game": "deal", "num": None}
+
+
+def test_game_match_bare_deal_en():
+    assert extract_game_intent("deal") == {"game": "deal", "num": None}
+
+
+def test_game_match_bare_deal_translit():
+    assert extract_game_intent("деал") == {"game": "deal", "num": None}
+
+
+def test_game_match_deal_with_verb():
+    assert extract_game_intent("запусти сделку") == {"game": "deal", "num": None}
+
+
+def test_game_match_deal_with_play_phrase():
+    assert extract_game_intent("давай сыграем в сделку") == {"game": "deal", "num": None}
+
+
+def test_game_match_deal_inflection():
+    assert extract_game_intent("сделке") == {"game": "deal", "num": None}
+
+
+# ----- ShowDealTopSkill -----
+
+
+def test_dealtop_match_bare_rating():
+    assert extract_dealtop_intent("рейтинг сделки") == {}
+
+
+def test_dealtop_match_bare_top():
+    assert extract_dealtop_intent("топ сделки") == {}
+
+
+def test_dealtop_match_bare_leaderboard():
+    assert extract_dealtop_intent("лидерборд сделки") == {}
+
+
+def test_dealtop_match_with_verb():
+    assert extract_dealtop_intent("покажи рейтинг сделки") == {}
+
+
+def test_dealtop_match_with_verb_us():
+    assert extract_dealtop_intent("покажи нам топ сделок") == {}
+
+
+def test_dealtop_match_show_action():
+    assert extract_dealtop_intent("показать рейтинг сделки") == {}
+
+
+def test_dealtop_match_english_word_top():
+    assert extract_dealtop_intent("top deal") == {}
+
+
+def test_dealtop_match_inflection():
+    assert extract_dealtop_intent("рейтинг сделок") == {}
+
+
+def test_dealtop_match_with_po():
+    assert extract_dealtop_intent("рейтинг по сделке") == {}
+
+
+def test_dealtop_match_punct():
+    assert extract_dealtop_intent("покажи топ сделки!") == {}
+
+
+def test_dealtop_no_match_other_game():
+    assert extract_dealtop_intent("рейтинг квиза") is None
+
+
+def test_dealtop_no_match_greeting():
+    assert extract_dealtop_intent("привет") is None
+
+
+def test_dealtop_no_match_general_question():
+    assert extract_dealtop_intent("какой у нас рейтинг") is None
+
+
+def test_dealtop_skill_match():
+    s = ShowDealTopSkill()
+    assert s.match("покажи рейтинг сделки") == {}

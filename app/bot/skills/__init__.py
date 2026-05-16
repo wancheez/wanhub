@@ -2,9 +2,10 @@ from aiogram.types import Message
 
 from app.bot.skills.base import Skill
 from app.bot.skills.send_image import SendImageSkill
+from app.bot.skills.show_dealtop import ShowDealTopSkill
 from app.bot.skills.start_game import StartGameSkill
 
-SKILLS: list[Skill] = [StartGameSkill(), SendImageSkill()]
+SKILLS: list[Skill] = [StartGameSkill(), ShowDealTopSkill(), SendImageSkill()]
 
 
 async def try_skills(message: Message, text: str) -> bool:

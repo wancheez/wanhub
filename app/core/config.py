@@ -81,6 +81,11 @@ MOVIES_DB_PATH: Path = PROJECT_ROOT / "data" / "movies.sqlite3"
 # с `--kind tv` и пишет в `shows.sqlite3`.
 SHOWS_DB_PATH: Path = PROJECT_ROOT / "data" / "shows.sqlite3"
 
+# Writable SQLite для статистики игры «Сделка или нет» (/deal).
+# Хранит исходы всех партий по chat_id для лидерборда. Создаётся при
+# первом старте бота (см. `app/services/deal_db.init_db`).
+DEAL_STATS_DB_PATH: Path = PROJECT_ROOT / "data" / "deal_stats.sqlite3"
+
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
 

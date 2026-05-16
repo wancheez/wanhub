@@ -27,7 +27,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=__PROJECT_DIR__/logs
+# logs/ — app.log + chat.sqlite3 (writable из бота).
+# data/ — deal_stats.sqlite3 (статистика /deal). Без этого SQLite mode=rwc
+# падает на CREATE с «unable to open database file», т.к. /home read-only.
+ReadWritePaths=__PROJECT_DIR__/logs __PROJECT_DIR__/data
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
