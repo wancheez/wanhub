@@ -86,6 +86,42 @@ def test_no_match_empty_subject():
     assert s.match("пришли фото") is None
 
 
+def test_match_noun_led_photo():
+    """«фото X» без глагола — продакшен-кейс «Чат фото жвачки по рублю»."""
+    s = SendImageSkill()
+    r = s.match("фото жвачки по рублю")
+    assert r is not None
+    assert r["fallback"] == "жвачки по рублю"
+    assert r["raw"] == "фото жвачки по рублю"
+
+
+def test_match_noun_led_accusative():
+    s = SendImageSkill()
+    r = s.match("картинку котика")
+    assert r is not None
+    assert r["fallback"] == "котика"
+
+
+def test_match_noun_led_capitalized_with_punct():
+    s = SendImageSkill()
+    r = s.match("Фотку морского заката!")
+    assert r is not None
+    assert r["fallback"] == "морского заката"
+
+
+def test_no_match_bare_noun():
+    s = SendImageSkill()
+    # «фото» / «картинка» в одиночку — субъекта нет, не запрос.
+    assert s.match("фото") is None
+    assert s.match("картинка") is None
+
+
+def test_no_match_pik_noun_led():
+    s = SendImageSkill()
+    # «пик» в начале без глагола — омоним «вершина горы», не картинка.
+    assert s.match("пик горы Эверест") is None
+
+
 # ----- StartGameSkill -----
 
 

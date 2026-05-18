@@ -10,6 +10,19 @@ from app.services.image_search import fetch_image_bytes, find_image_urls
 
 log = logging.getLogger("app")
 
+# Image-noun forms — nominative and accusative, singular and plural. Used both
+# as a marker inside verb-led requests and as the leading token of noun-led
+# requests («фото жвачки по рублю»).
+_IMAGE_NOUNS = (
+    r"фото|"
+    r"фотку|фотка|фотки|"
+    r"фотографию|фотография|фотографии|"
+    r"картинку|картинка|картинки|"
+    r"пикчу|пикча|пикчи|"
+    r"изображение|изображения|"
+    r"пик"
+)
+
 # Allowed verbs starting an image request.
 VERB_RE = re.compile(
     r"^(?:пришли|покажи|покажешь|найди|скинь|кинь|дай|отправь)\s+"
@@ -19,8 +32,14 @@ VERB_RE = re.compile(
 )
 
 # Image-noun anywhere in the rest indicates this really is a picture request.
-NOUN_RE = re.compile(
-    r"\b(?:фото|фотку|фотографию|картинку|пикчу|изображение|пик)\b",
+NOUN_RE = re.compile(rf"\b(?:{_IMAGE_NOUNS})\b", re.IGNORECASE)
+
+# Noun-led request without a verb: «фото жвачки по рублю», «картинку кота».
+# Excludes bare «пик» to avoid false positives like «пик горы Эверест» (info
+# request, not photo). In verb-led variant «пик» остаётся — там явное намерение.
+_LEAD_NOUNS = _IMAGE_NOUNS.replace("|пик", "")
+NOUN_LEAD_RE = re.compile(
+    rf"^(?:{_LEAD_NOUNS})\s+(.+?)[.!?]*\s*$",
     re.IGNORECASE,
 )
 
@@ -47,19 +66,31 @@ def extract_image_intent(text: str) -> dict[str, str] | None:
     Public so the web chat can reuse the same intent matcher without dragging
     in aiogram-specific handler code.
     """
-    m = VERB_RE.match(text.strip())
-    if not m:
-        return None
-    rest = m.group(1).strip()
+    stripped = text.strip()
 
-    if not NOUN_RE.search(rest):
-        return None
+    # Verb-led: «пришли фото кота», «покажи картинку дракона».
+    m = VERB_RE.match(stripped)
+    if m:
+        rest = m.group(1).strip()
+        if not NOUN_RE.search(rest):
+            return None
+        fallback = NOUN_RE.sub(" ", rest)
+        fallback = re.sub(r"\s+", " ", fallback).strip(EDGE_TRIM)
+        if not fallback:
+            return None
+        return {"raw": rest, "fallback": fallback}
 
-    fallback = NOUN_RE.sub(" ", rest)
-    fallback = re.sub(r"\s+", " ", fallback).strip(EDGE_TRIM)
-    if not fallback:
-        return None
-    return {"raw": rest, "fallback": fallback}
+    # Noun-led: «фото жвачки по рублю», «картинку кота» — без глагола.
+    # Бот всё равно вызывается только когда обращены к нему (приват или
+    # «Чат» в группе), так что намерение из контекста ясное.
+    m = NOUN_LEAD_RE.match(stripped)
+    if m:
+        rest = m.group(1).strip(EDGE_TRIM)
+        if not rest:
+            return None
+        return {"raw": stripped, "fallback": rest}
+
+    return None
 
 
 class SendImageSkill:

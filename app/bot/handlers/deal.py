@@ -13,6 +13,7 @@
   /dealtop    — лидерборд этого чата
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from html import escape
@@ -71,6 +72,14 @@ _CASE_EMOJIS: tuple[str, ...] = (
 
 def _case_emoji(case_id: int) -> str:
     return _CASE_EMOJIS[(case_id - 1) % len(_CASE_EMOJIS)]
+
+
+# Авто-переход между фазами: если за 30 сек никто не нажмёт «⏭ Далее», бот сам
+# двинет игру дальше — закрывает класс багов «UI говорит готово, а кнопка не
+# срабатывает». Ручной клик продолжает работать и просто отменяет таймер.
+_AUTO_ADVANCE_SECONDS = 30
+_AUTO_ADVANCE_HINT = f"(авто через {_AUTO_ADVANCE_SECONDS} сек)"
+_auto_advance_tasks: dict[int, asyncio.Task[None]] = {}
 
 
 def _grid_sizes(button_count: int, width: int) -> tuple[int, ...]:
@@ -397,7 +406,9 @@ def _text_opening(session: deal.DealSession) -> str:
     if remaining_to_open > 0:
         lines.append(f"Открыть в этом раунде: <b>{remaining_to_open}</b> из {target}")
     else:
-        lines.append("✅ Все кейсы раунда открыты. Любой игрок — жми <b>⏭ Далее</b>.")
+        lines.append(
+            f"✅ Все кейсы раунда открыты. <b>⏭ Далее</b> — любой игрок {_AUTO_ADVANCE_HINT}."
+        )
     if active:
         lines.append("В игре: " + ", ".join(escape(n) for n in active))
     if dealt:
@@ -449,7 +460,9 @@ def _text_banker(session: deal.DealSession) -> str:
     if pending:
         lines.append("Ждём решение: " + ", ".join(escape(n) for n in pending))
     else:
-        lines.append("✅ Все решили. Любой игрок — жми <b>⏭ Далее</b>.")
+        lines.append(
+            f"✅ Все решили. <b>⏭ Далее</b> — любой игрок {_AUTO_ADVANCE_HINT}."
+        )
     lines.append("")
     lines.append(_value_sidebar(session))
     return "\n".join(lines)
@@ -524,6 +537,72 @@ async def _bump_phase(prev_message: Message, session: deal.DealSession) -> None:
     await _render(prev_message, session, edit=False)
 
 
+async def _try_advance(message: Message, session: deal.DealSession) -> bool:
+    """Перейти из ready-фазы в следующую. True — если переход случился.
+
+    Используется и ручным «⏭ Далее», и таймером авто-перехода. Безопасно
+    вызывать в любой фазе: если условие готовности не выполнено, ничего не
+    делает и возвращает False.
+    """
+    if session.phase is deal.DealPhase.OPENING and deal.is_round_complete(session):
+        if deal.is_last_round(session):
+            deal.end_game_reveal(session)
+            await _finalize_and_summarize(message, session)
+        else:
+            deal.transition_to_banker(session)
+            await _bump_phase(message, session)
+        return True
+    if session.phase is deal.DealPhase.BANKER and deal.all_active_decided(session):
+        finalize_res = deal.finalize_banker(session)
+        if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
+            await _bump_phase(message, session)
+        else:
+            await _finalize_and_summarize(message, session)
+        return True
+    return False
+
+
+def _cancel_auto_advance(chat_id: int) -> None:
+    """Снять висящий таймер авто-перехода для чата, если есть."""
+    task = _auto_advance_tasks.pop(chat_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
+    """Запустить (перезапустить) таймер: через `_AUTO_ADVANCE_SECONDS` — `_try_advance`.
+
+    Защищён от устаревания: если к моменту срабатывания сессия в _sessions
+    уже другая (отмена/новая партия) — таймер тихо отменяется. Если условие
+    готовности больше не выполняется (гонка) — просто перерисовываем UI,
+    чтобы он отразил реальное состояние.
+    """
+    _cancel_auto_advance(session.chat_id)
+    chat_id = session.chat_id
+
+    async def _runner() -> None:
+        try:
+            await asyncio.sleep(_AUTO_ADVANCE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        if deal.get_session(chat_id) is not session:
+            return
+        try:
+            advanced = await _try_advance(message, session)
+            if not advanced:
+                # Условие готовности «уплыло» — рефрешим сообщение под актуальное.
+                await _render(message, session, edit=True)
+        except Exception:
+            log.exception("deal: chat=%d auto-advance failed", chat_id)
+        finally:
+            # Только если это всё ещё «наш» таск (на случай если кто-то
+            # перезапустил таймер прямо перед finally).
+            if _auto_advance_tasks.get(chat_id) is asyncio.current_task():
+                _auto_advance_tasks.pop(chat_id, None)
+
+    _auto_advance_tasks[chat_id] = asyncio.create_task(_runner())
+
+
 def _render_payload(session: deal.DealSession) -> tuple[str, InlineKeyboardMarkup | None]:
     phase = session.phase
     if phase is deal.DealPhase.LOBBY:
@@ -587,6 +666,7 @@ async def cmd_dealcancel(message: Message) -> None:
     if message.from_user is not None and message.from_user.id != session.starter_id:
         await message.answer("Отменить может только тот, кто запустил.")
         return
+    _cancel_auto_advance(chat_id)
     deal.cancel_session(chat_id)
     await message.answer("«Сделка» отменена.")
 
@@ -881,11 +961,12 @@ async def on_open_case(cb: CallbackQuery) -> None:
 
     assert isinstance(cb.message, Message)
     value = session.case_values[case_id]
-    # Раунд может закончиться этим открытием (`OK_END_OF_ROUND`), но переход
-    # к банкиру / финалу делает не автомат — любой игрок жмёт «⏭ Далее». Здесь
-    # просто перерисовываем: `_render_payload` сам подложит next-клаву, как
-    # только `is_round_complete` стало True.
+    # Раунд может закончиться этим открытием (`OK_END_OF_ROUND`): перерисовываем
+    # (next-клаву подложит `_render_payload`) и заводим таймер авто-перехода.
+    # Ручной «⏭ Далее» отменит таймер; иначе через 30 сек сработает сам.
     await _render(cb.message, session, edit=True)
+    if res is deal.OpenResult.OK_END_OF_ROUND:
+        _start_auto_advance(cb.message, session)
     await cb.answer(f"Кейс {_case_emoji(case_id)}: {_fmt_rub(value)}")
 
 
@@ -944,9 +1025,12 @@ async def _handle_decision(
         return
 
     assert isinstance(cb.message, Message)
-    # Перерисовываем: если все решили, `_render_payload` сам подложит
-    # «⏭ Далее» — финал раунда инициирует любой игрок кликом, не автомат.
+    # Перерисовываем: если все решили, `_render_payload` подложит «⏭ Далее»
+    # и заводим таймер авто-перехода. Ручной клик отменит таймер; иначе через
+    # 30 сек банкер-раунд закроется сам.
     await _render(cb.message, session, edit=True)
+    if deal.all_active_decided(session):
+        _start_auto_advance(cb.message, session)
     await cb.answer("✅ Сделка принята" if choice == "deal" else "❌ Не сделка принята")
 
 
@@ -974,34 +1058,43 @@ async def on_next(cb: CallbackQuery) -> None:
 
     assert isinstance(cb.message, Message)
 
-    if session.phase is deal.DealPhase.OPENING:
-        if not deal.is_round_complete(session):
-            await cb.answer("Сначала откройте все кейсы раунда.")
-            return
-        if deal.is_last_round(session):
-            deal.end_game_reveal(session)
-            await _finalize_and_summarize(cb.message, session)
-            await cb.answer()
-            return
-        deal.transition_to_banker(session)
-        await _bump_phase(cb.message, session)
-        await cb.answer()
+    # Ручной клик отменяет авто-таймер. Дальше — общий путь через `_try_advance`.
+    _cancel_auto_advance(session.chat_id)
+
+    if session.phase is deal.DealPhase.OPENING and not deal.is_round_complete(session):
+        # Защита от рассинхронизации: сообщение могло показывать «⏭ Далее»,
+        # а серверный стейт говорит «раунд не завершён». Перерисуем под
+        # актуальное состояние, чтобы игрок не «застрял» на ⏭.
+        await _render(cb.message, session, edit=True)
+        await cb.answer("Сначала откройте все кейсы раунда.")
+        return
+    if session.phase is deal.DealPhase.BANKER and not deal.all_active_decided(session):
+        # То же самое: текст и проверка могли разойтись (например, гонка двух
+        # хендлеров или подавленный TelegramBadRequest в прошлом edit_text).
+        # Перерисовываем + лог для дальнейшей диагностики.
+        pending = [
+            p.name
+            for uid, p in session.players.items()
+            if p.status == "active" and uid not in session.round_decisions
+        ]
+        log.warning(
+            "deal: chat=%d on_next BANKER inconsistency: pending=%r decisions=%r "
+            "players=%r round_idx=%d",
+            session.chat_id,
+            pending,
+            dict(session.round_decisions),
+            {uid: (p.name, p.status) for uid, p in session.players.items()},
+            session.round_idx,
+        )
+        await _render(cb.message, session, edit=True)
+        await cb.answer("Не все ещё решили.")
         return
 
-    if session.phase is deal.DealPhase.BANKER:
-        if not deal.all_active_decided(session):
-            await cb.answer("Не все ещё решили.")
-            return
-        finalize_res = deal.finalize_banker(session)
-        if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
-            await _bump_phase(cb.message, session)
-        else:
-            # OK_FINISHED — все вылетели по сделкам.
-            await _finalize_and_summarize(cb.message, session)
-        await cb.answer()
+    advanced = await _try_advance(cb.message, session)
+    if not advanced:
+        await cb.answer("Сейчас «Далее» не нужно.")
         return
-
-    await cb.answer("Сейчас «Далее» не нужно.")
+    await cb.answer()
 
 
 @router.callback_query(F.data.startswith(_CB_CANCEL))
@@ -1020,6 +1113,7 @@ async def on_cancel(cb: CallbackQuery) -> None:
     if cb.from_user.id != session.starter_id:
         await cb.answer("Только стартер.", show_alert=False)
         return
+    _cancel_auto_advance(chat_id)
     deal.cancel_session(chat_id)
     assert isinstance(cb.message, Message)
     with _suppress_edit_noop():
@@ -1081,6 +1175,7 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
             case_count=session.case_count or 0,
             round_idx=p.deal_round_idx,
         )
+    _cancel_auto_advance(session.chat_id)
     deal.cancel_session(session.chat_id)
 
 
