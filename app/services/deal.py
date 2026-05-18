@@ -207,6 +207,9 @@ class DealSession:
     # суммой, а прошлые — скрыть; (2) в BANKER-тексте показать «🔓 В этом
     # раунде открыли: …». Сбрасывается в `finalize_banker` при переходе.
     current_round_opened: set[int] = field(default_factory=set)
+    # Кто открыл какой кейс в текущем раунде. Используется в BANKER-тексте,
+    # чтобы показать «👤 X — 2, Y — 1». Сбрасывается вместе с `current_round_opened`.
+    current_round_opened_by: dict[int, int] = field(default_factory=dict)
     personal_case_id: int | None = None
     players: dict[int, PlayerState] = field(default_factory=dict)
     round_idx: int = 0
@@ -337,6 +340,7 @@ def open_case(session: DealSession, user_id: int, case_id: int) -> OpenResult:
 
     session.opened.add(case_id)
     session.current_round_opened.add(case_id)
+    session.current_round_opened_by[case_id] = user_id
     session.cases_opened_this_round += 1
 
     if session.cases_opened_this_round >= target:
@@ -499,6 +503,7 @@ def finalize_banker(session: DealSession) -> FinalizeResult:
     session.round_idx += 1
     session.cases_opened_this_round = 0
     session.current_round_opened = set()
+    session.current_round_opened_by = {}
     session.phase = DealPhase.OPENING
     return FinalizeResult.OK_NEXT_ROUND
 

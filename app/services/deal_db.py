@@ -17,19 +17,26 @@ import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-
 from app.core.config import DEAL_STATS_DB_PATH
 
 log = logging.getLogger("app")
 
 __all__ = [
+    "BestGameRow",
     "DealStatsDBUnavailable",
     "LeaderRow",
+    "chats_with_games_between",
     "init_db",
     "is_available",
+    "last_reset_before",
+    "mark_adhoc_reset",
+    "mark_weekly_reset",
     "record_outcome",
     "reset_cache",
     "top_for_chat",
+    "top_for_chat_avg",
+    "was_weekly_posted_at",
+    "weekly_best_game",
 ]
 
 
@@ -44,6 +51,14 @@ class LeaderRow:
     total: int
     games: int
     avg_per_game: int
+
+
+@dataclass(frozen=True)
+class BestGameRow:
+    user_name: str
+    winnings: int
+    case_count: int
+    round_idx: int | None
 
 
 _conn: sqlite3.Connection | None = None
@@ -64,6 +79,25 @@ CREATE TABLE IF NOT EXISTS outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_chat      ON outcomes(chat_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_chat_user ON outcomes(chat_id, user_id);
+
+-- Глобальные плановые сбросы (по воскресеньям 21:00 МСК). Одна строка на
+-- границу — общая для всех чатов.
+CREATE TABLE IF NOT EXISTS deal_resets (
+    at_utc    TEXT PRIMARY KEY,
+    kind      TEXT NOT NULL CHECK (kind IN ('weekly','adhoc')),
+    posted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deal_resets_kind ON deal_resets(kind, at_utc);
+
+-- Внеочередные сбросы, ограниченные одним чатом (админ запускает
+-- /dealsummary в конкретном чате — обнуляет рейтинг только там).
+CREATE TABLE IF NOT EXISTS deal_adhoc_resets (
+    chat_id   INTEGER NOT NULL,
+    at_utc    TEXT NOT NULL,
+    posted_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, at_utc)
+);
+CREATE INDEX IF NOT EXISTS idx_deal_adhoc_chat ON deal_adhoc_resets(chat_id, at_utc);
 """
 
 
@@ -219,3 +253,212 @@ def top_for_chat(chat_id: int, limit: int = 20) -> list[LeaderRow]:
         )
         for r in rows
     ]
+
+
+def chats_with_games_between(start_utc: str, end_utc: str) -> list[int]:
+    """Уникальные chat_id, где была хотя бы одна партия в окне (start_utc, end_utc]."""
+    if _unavailable:
+        return []
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            SELECT DISTINCT chat_id
+            FROM outcomes
+            WHERE finished_at > ? AND finished_at <= ?
+            """,
+            (start_utc, end_utc),
+        )
+        return [int(r["chat_id"]) for r in cur.fetchall()]
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: chats_with_games_between failed (%s)", e)
+        return []
+
+
+def top_for_chat_avg(
+    chat_id: int,
+    start_utc: str,
+    end_utc: str,
+    *,
+    min_games: int,
+    limit: int,
+) -> list[LeaderRow]:
+    """Топ игроков по среднему выигрышу в окне (start_utc, end_utc].
+
+    Отсекает игроков с games < min_games. Сортировка: avg DESC, total DESC,
+    user_name ASC (стабильный тай-брейк по имени).
+    """
+    if _unavailable:
+        return []
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            WITH agg AS (
+                SELECT user_id,
+                       MAX(winnings)    AS best,
+                       SUM(winnings)    AS total,
+                       COUNT(*)         AS games,
+                       AVG(winnings)    AS avg_per_game,
+                       MAX(finished_at) AS last_finished
+                FROM outcomes
+                WHERE chat_id = ?
+                  AND finished_at > ?
+                  AND finished_at <= ?
+                GROUP BY user_id
+                HAVING games >= ?
+            )
+            SELECT
+                (SELECT user_name FROM outcomes o
+                  WHERE o.chat_id = ?
+                    AND o.user_id = agg.user_id
+                    AND o.finished_at = agg.last_finished
+                  LIMIT 1) AS user_name,
+                agg.best, agg.total, agg.games, agg.avg_per_game
+            FROM agg
+            ORDER BY agg.avg_per_game DESC, agg.total DESC, user_name ASC
+            LIMIT ?
+            """,
+            (chat_id, start_utc, end_utc, min_games, chat_id, limit),
+        )
+        rows = cur.fetchall()
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: top_for_chat_avg failed (%s)", e)
+        return []
+    return [
+        LeaderRow(
+            user_name=r["user_name"] or "?",
+            best=int(r["best"]),
+            total=int(r["total"]),
+            games=int(r["games"]),
+            avg_per_game=int(r["avg_per_game"]),
+        )
+        for r in rows
+    ]
+
+
+def weekly_best_game(
+    chat_id: int,
+    start_utc: str,
+    end_utc: str,
+) -> BestGameRow | None:
+    """Партия с максимальным выигрышем в окне (start_utc, end_utc].
+
+    Тай-брейк — самая ранняя по `finished_at` (чтобы детерминированно, и
+    исторически «первый, кто взял этот максимум»).
+    """
+    if _unavailable:
+        return None
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            SELECT user_name, winnings, case_count, round_idx
+            FROM outcomes
+            WHERE chat_id = ?
+              AND finished_at > ?
+              AND finished_at <= ?
+            ORDER BY winnings DESC, finished_at ASC
+            LIMIT 1
+            """,
+            (chat_id, start_utc, end_utc),
+        )
+        row = cur.fetchone()
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: weekly_best_game failed (%s)", e)
+        return None
+    if row is None:
+        return None
+    return BestGameRow(
+        user_name=row["user_name"] or "?",
+        winnings=int(row["winnings"]),
+        case_count=int(row["case_count"]),
+        round_idx=row["round_idx"] if row["round_idx"] is None else int(row["round_idx"]),
+    )
+
+
+def last_reset_before(chat_id: int, at_utc: str) -> str | None:
+    """Самый свежий момент сброса (плановый ИЛИ ad-hoc этого чата) до `at_utc`.
+
+    Плановые сбросы глобальны и применимы ко всем чатам; ad-hoc сбросы
+    привязаны к конкретному чату, поэтому в выборку идут только те, что
+    относятся к этому `chat_id`. None если ни одного сброса ещё не было.
+    """
+    if _unavailable:
+        return None
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            SELECT MAX(at_utc) AS m FROM (
+                SELECT at_utc FROM deal_resets WHERE at_utc < ?
+                UNION ALL
+                SELECT at_utc FROM deal_adhoc_resets
+                  WHERE chat_id = ? AND at_utc < ?
+            )
+            """,
+            (at_utc, chat_id, at_utc),
+        )
+        row = cur.fetchone()
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: last_reset_before failed (%s)", e)
+        return None
+    if row is None or row["m"] is None:
+        return None
+    return str(row["m"])
+
+
+def was_weekly_posted_at(at_utc: str) -> bool:
+    """Был ли в этой `at_utc` записан плановый (kind='weekly') сброс?"""
+    if _unavailable:
+        return False
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            "SELECT 1 FROM deal_resets WHERE at_utc = ? AND kind = 'weekly' LIMIT 1",
+            (at_utc,),
+        )
+        return cur.fetchone() is not None
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: was_weekly_posted_at failed (%s)", e)
+        return False
+
+
+def mark_weekly_reset(at_utc: str) -> bool:
+    """Закрепить плановый воскресный сброс. True = клейм наш, False = уже занят."""
+    if _unavailable:
+        return False
+    try:
+        conn = _get_connection()
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO deal_resets (at_utc, kind, posted_at)
+                VALUES (?, 'weekly', ?)
+                """,
+                (at_utc, datetime.now(UTC).isoformat()),
+            )
+            return cur.rowcount == 1
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: mark_weekly_reset failed (%s)", e)
+        return False
+
+
+def mark_adhoc_reset(chat_id: int, at_utc: str) -> bool:
+    """Закрепить ad-hoc сброс в этом чате. True = клейм наш, False = уже занят."""
+    if _unavailable:
+        return False
+    try:
+        conn = _get_connection()
+        with conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO deal_adhoc_resets (chat_id, at_utc, posted_at)
+                VALUES (?, ?, ?)
+                """,
+                (chat_id, at_utc, datetime.now(UTC).isoformat()),
+            )
+            return cur.rowcount == 1
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: mark_adhoc_reset failed (%s)", e)
+        return False

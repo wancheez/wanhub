@@ -135,3 +135,169 @@ def test_top_limit_caps_rows(fresh_db: Path) -> None:
             round_idx=0,
         )
     assert len(deal_db.top_for_chat(42, limit=3)) == 3
+
+
+# ---------------------------------------------------------------------------
+# Окно-фильтрованные хелперы и таблица сбросов
+# ---------------------------------------------------------------------------
+
+
+def _insert_outcome(
+    chat_id: int,
+    user_id: int,
+    name: str,
+    winnings: int,
+    finished_at: str,
+) -> None:
+    """Прямая вставка с явным `finished_at` — иначе `record_outcome` ставит now."""
+    conn = deal_db._get_connection()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO outcomes
+              (chat_id, user_id, user_name, winnings, dealt, case_count, round_idx, finished_at)
+            VALUES (?, ?, ?, ?, 0, 22, NULL, ?)
+            """,
+            (chat_id, user_id, name, winnings, finished_at),
+        )
+
+
+def test_chats_with_games_between_returns_distinct_in_window(fresh_db: Path) -> None:
+    _insert_outcome(1, 1, "A", 100, "2026-05-10T18:00:00+00:00")  # before
+    _insert_outcome(2, 1, "A", 100, "2026-05-11T18:00:01+00:00")  # in
+    _insert_outcome(2, 2, "B", 100, "2026-05-12T10:00:00+00:00")  # in, same chat
+    _insert_outcome(3, 1, "A", 100, "2026-05-17T18:00:00+00:00")  # in (boundary <=)
+    _insert_outcome(4, 1, "A", 100, "2026-05-17T18:00:01+00:00")  # after
+    got = sorted(
+        deal_db.chats_with_games_between(
+            "2026-05-10T18:00:00+00:00",
+            "2026-05-17T18:00:00+00:00",
+        )
+    )
+    assert got == [2, 3]
+
+
+def test_top_for_chat_avg_filters_window_and_min_games(fresh_db: Path) -> None:
+    # Алиса: 3 партии в окне, avg 200
+    _insert_outcome(42, 1, "Алиса", 100, "2026-05-12T10:00:00+00:00")
+    _insert_outcome(42, 1, "Алиса", 300, "2026-05-13T10:00:00+00:00")
+    _insert_outcome(42, 1, "Алиса", 200, "2026-05-14T10:00:00+00:00")
+    # Боб: 2 партии в окне → не проходит min_games=3
+    _insert_outcome(42, 2, "Боб", 500, "2026-05-12T10:00:00+00:00")
+    _insert_outcome(42, 2, "Боб", 500, "2026-05-13T10:00:00+00:00")
+    # Чарли: 3 партии, но одна вне окна
+    _insert_outcome(42, 3, "Чарли", 1000, "2026-05-01T10:00:00+00:00")  # вне
+    _insert_outcome(42, 3, "Чарли", 50, "2026-05-12T10:00:00+00:00")
+    _insert_outcome(42, 3, "Чарли", 50, "2026-05-13T10:00:00+00:00")
+
+    rows = deal_db.top_for_chat_avg(
+        42,
+        "2026-05-10T18:00:00+00:00",
+        "2026-05-17T18:00:00+00:00",
+        min_games=3,
+        limit=10,
+    )
+    # Только Алиса (3 партии в окне). Боб отсеян по порогу. Чарли — только 2 в окне.
+    assert [r.user_name for r in rows] == ["Алиса"]
+    assert rows[0].avg_per_game == 200
+
+
+def test_top_for_chat_avg_orders_by_avg_then_total_then_name(fresh_db: Path) -> None:
+    # Двое с одинаковым avg=200, но разный total
+    for ts in ("2026-05-12T10:00:00+00:00", "2026-05-13T10:00:00+00:00"):
+        _insert_outcome(42, 1, "Анна", 200, ts)
+        _insert_outcome(42, 2, "Борис", 200, ts)
+    _insert_outcome(42, 1, "Анна", 200, "2026-05-14T10:00:00+00:00")
+    _insert_outcome(42, 1, "Анна", 200, "2026-05-15T10:00:00+00:00")  # total 800
+    _insert_outcome(42, 2, "Борис", 200, "2026-05-14T10:00:00+00:00")  # total 600
+    rows = deal_db.top_for_chat_avg(
+        42,
+        "2026-05-10T18:00:00+00:00",
+        "2026-05-17T18:00:00+00:00",
+        min_games=2,
+        limit=10,
+    )
+    assert [r.user_name for r in rows] == ["Анна", "Борис"]
+    assert rows[0].total > rows[1].total
+
+
+def test_weekly_best_game_max_with_earliest_tiebreak(fresh_db: Path) -> None:
+    _insert_outcome(42, 1, "A", 100, "2026-05-12T10:00:00+00:00")
+    _insert_outcome(42, 2, "B", 500, "2026-05-13T10:00:00+00:00")
+    _insert_outcome(42, 3, "C", 500, "2026-05-14T10:00:00+00:00")  # tie, позже
+    best = deal_db.weekly_best_game(
+        42,
+        "2026-05-10T18:00:00+00:00",
+        "2026-05-17T18:00:00+00:00",
+    )
+    assert best is not None
+    assert best.user_name == "B"  # тай-брейк по самой ранней finished_at
+    assert best.winnings == 500
+    assert best.case_count == 22
+
+
+def test_weekly_best_game_none_outside_window(fresh_db: Path) -> None:
+    _insert_outcome(42, 1, "A", 100, "2026-05-01T10:00:00+00:00")
+    assert (
+        deal_db.weekly_best_game(
+            42,
+            "2026-05-10T18:00:00+00:00",
+            "2026-05-17T18:00:00+00:00",
+        )
+        is None
+    )
+
+
+def test_last_reset_before_combines_weekly_and_adhoc_for_chat(fresh_db: Path) -> None:
+    # Чат 42 — наблюдатель.
+    assert deal_db.last_reset_before(42, "2026-05-17T18:00:00+00:00") is None
+    assert deal_db.mark_weekly_reset("2026-05-10T18:00:00+00:00") is True
+    assert deal_db.mark_adhoc_reset(42, "2026-05-14T15:00:00+00:00") is True
+    assert deal_db.mark_weekly_reset("2026-05-17T18:00:00+00:00") is True
+    # Строгий «<»: запрос на момент 17.05 18:00 не должен включать сам 17.05 18:00.
+    assert (
+        deal_db.last_reset_before(42, "2026-05-17T18:00:00+00:00")
+        == "2026-05-14T15:00:00+00:00"
+    )
+    # На момент после — возвращается уже плановый 17.05 (он свежее, чем 14.05).
+    assert (
+        deal_db.last_reset_before(42, "2026-05-17T18:00:01+00:00")
+        == "2026-05-17T18:00:00+00:00"
+    )
+
+
+def test_last_reset_before_ignores_other_chats_adhoc(fresh_db: Path) -> None:
+    """Ad-hoc одного чата не должен сдвигать окно другого."""
+    deal_db.mark_weekly_reset("2026-05-10T18:00:00+00:00")
+    # Чат 100 сделал ad-hoc 15.05.
+    deal_db.mark_adhoc_reset(100, "2026-05-15T12:00:00+00:00")
+    # У чата 200 окно стартует с прошлого воскресенья (10.05), а не с 15.05.
+    assert (
+        deal_db.last_reset_before(200, "2026-05-17T18:00:00+00:00")
+        == "2026-05-10T18:00:00+00:00"
+    )
+    # А у самого чата 100 — с его ad-hoc'а.
+    assert (
+        deal_db.last_reset_before(100, "2026-05-17T18:00:00+00:00")
+        == "2026-05-15T12:00:00+00:00"
+    )
+
+
+def test_was_weekly_posted_at_ignores_adhoc(fresh_db: Path) -> None:
+    deal_db.mark_adhoc_reset(42, "2026-05-14T15:00:00+00:00")
+    assert deal_db.was_weekly_posted_at("2026-05-14T15:00:00+00:00") is False
+    deal_db.mark_weekly_reset("2026-05-17T18:00:00+00:00")
+    assert deal_db.was_weekly_posted_at("2026-05-17T18:00:00+00:00") is True
+
+
+def test_mark_weekly_reset_is_idempotent(fresh_db: Path) -> None:
+    assert deal_db.mark_weekly_reset("2026-05-17T18:00:00+00:00") is True
+    assert deal_db.mark_weekly_reset("2026-05-17T18:00:00+00:00") is False
+
+
+def test_mark_adhoc_reset_is_per_chat(fresh_db: Path) -> None:
+    # В одном и том же `at_utc` — клейм допустим только один на чат, но в разных
+    # чатах одновременно — ok.
+    assert deal_db.mark_adhoc_reset(100, "2026-05-15T12:00:00+00:00") is True
+    assert deal_db.mark_adhoc_reset(100, "2026-05-15T12:00:00+00:00") is False
+    assert deal_db.mark_adhoc_reset(200, "2026-05-15T12:00:00+00:00") is True

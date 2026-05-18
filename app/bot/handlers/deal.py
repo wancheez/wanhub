@@ -14,6 +14,7 @@
 """
 
 import logging
+from datetime import UTC, datetime
 from html import escape
 
 from aiogram import F, Router
@@ -27,7 +28,8 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.services import deal, deal_db, games
+from app.core.config import TELEGRAM_ADMIN_ID
+from app.services import deal, deal_db, deal_weekly, games
 
 router = Router(name="deal")
 log = logging.getLogger("app")
@@ -298,7 +300,17 @@ def _rules_text() -> str:
         "🏁 <b>Финал.</b> Если дошёл до последнего раунда без сделки — "
         "получаешь сумму из личного кейса.\n"
         "\n"
-        "🏆 <b>Рейтинг чата:</b> /dealtop — топ по лучшим выигрышам."
+        "🏆 <b>Рейтинг чата:</b> /dealtop — топ текущей недели по среднему "
+        "выигрышу за партию.\n"
+        "\n"
+        "📅 <b>Недельные сезоны.</b> Каждое воскресенье в 21:00 МСК бот сам "
+        "подводит итоги недели: топ-3 по avg (мин. 3 партии), лучшая партия и "
+        "поздравление чемпиона — после этого счёт обнуляется и стартует новая "
+        "неделя.\n"
+        "\n"
+        "⚡ <b>Внеочередной сброс.</b> Админ может в любой момент написать "
+        "/dealsummary — бот опубликует промежуточные итоги в этом чате и "
+        "обнулит рейтинг прямо сейчас (только тут, другие чаты не задеты)."
     )
 
 
@@ -337,6 +349,31 @@ def _text_pick_personal(session: deal.DealSession) -> str:
     )
 
 
+def _opens_by_player_line(session: deal.DealSession) -> str | None:
+    """Строка «👤 Имя — 100к · 5к, …» по `current_round_opened_by`. None, если пусто."""
+    if not session.current_round_opened_by:
+        return None
+    per_player: dict[int, list[int]] = {}
+    for case_id, uid in session.current_round_opened_by.items():
+        value = session.case_values.get(case_id)
+        if value is None:
+            continue
+        per_player.setdefault(uid, []).append(value)
+    if not per_player:
+        return None
+    # Сортируем игроков по убыванию числа открытий (затем по имени), а суммы
+    # внутри — по убыванию: крупные впереди читаются легче.
+    ranked = sorted(
+        per_player.items(),
+        key=lambda kv: (-len(kv[1]), _player_name(session, kv[0]).lower()),
+    )
+    parts: list[str] = []
+    for uid, values in ranked:
+        sums = " · ".join(_fmt_rub_compact(v) for v in sorted(values, reverse=True))
+        parts.append(f"{escape(_player_name(session, uid))} — {sums}")
+    return "👤 " + "; ".join(parts)
+
+
 def _text_opening(session: deal.DealSession) -> str:
     assert session.case_count is not None
     total_rounds = len(session.round_schedule)
@@ -355,6 +392,9 @@ def _text_opening(session: deal.DealSession) -> str:
     if dealt:
         dealt_str = ", ".join(f"{escape(n)} ({_fmt_rub(w)})" for n, w in dealt)
         lines.append("Взяли сделку: " + dealt_str)
+    opens_line = _opens_by_player_line(session)
+    if opens_line is not None:
+        lines.append(opens_line)
     lines.append("")
     lines.append(_value_sidebar(session))
     return "\n".join(lines)
@@ -387,6 +427,9 @@ def _text_banker(session: deal.DealSession) -> str:
             + " · ".join(_fmt_rub_compact(v) for v in opened_vals)
             + " ₽"
         )
+        opens_line = _opens_by_player_line(session)
+        if opens_line is not None:
+            lines.append(opens_line)
     lines.append("")
     if deal_names:
         lines.append("✅ Приняли: " + ", ".join(escape(n) for n in deal_names))
@@ -547,23 +590,69 @@ async def cmd_dealtop(message: Message) -> None:
             "Лидерборд не работает до рестарта бота."
         )
         return
-    rows = deal_db.top_for_chat(message.chat.id)
+    now_utc = datetime.now(UTC)
+    start_utc = deal_weekly.effective_window_start_utc(message.chat.id, now_utc)
+    rows = deal_db.top_for_chat_avg(
+        message.chat.id,
+        deal_weekly.iso_utc(start_utc),
+        deal_weekly.iso_utc(now_utc),
+        min_games=1,
+        limit=20,
+    )
+    # Подпись периода — до конца текущей недели (следующая ВС 21:00 МСК),
+    # а не до «сейчас»: рейтинг показывает игроков ВСЕЙ недели, даже если она
+    # только-только началась. Выборку строк это не меняет.
+    period_end_utc = deal_weekly.next_summary_boundary_utc(now_utc)
+    period = deal_weekly._format_msk_range(start_utc, period_end_utc)
     if not rows:
         await message.answer(
-            "В этом чате ещё не сыграли ни одной партии в «Сделку».\nЗапусти /deal — и поехали!"
+            "<b>🏆 Топ периода «Сделка»</b>\n"
+            f"<i>{period}</i>\n"
+            "Пока никто не сыграл. Запусти /deal — и поехали!",
+            parse_mode="HTML",
         )
         return
-    lines = ["<b>🏆 Топ «Сделки» в этом чате</b>"]
+    lines = [
+        "<b>🏆 Топ периода «Сделка»</b>",
+        f"<i>{period}</i>",
+    ]
     medals = ["🥇", "🥈", "🥉"]
     for i, r in enumerate(rows):
         prefix = medals[i] if i < len(medals) else f"{i + 1}."
         lines.append(
             f"{prefix} <b>{escape(r.user_name)}</b> · "
-            f"best <b>{_fmt_rub(r.best)}</b> · "
-            f"total {_fmt_rub(r.total)} · "
-            f"{r.games} партий · avg {_fmt_rub(r.avg_per_game)}"
+            f"avg <b>{_fmt_rub(r.avg_per_game)}</b> · "
+            f"best {_fmt_rub(r.best)} · "
+            f"{r.games} партий · total {_fmt_rub(r.total)}"
         )
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("dealsummary"))
+async def cmd_dealsummary(message: Message) -> None:
+    """Админская команда внеочередного подведения итогов В ЭТОМ ЧАТЕ.
+
+    Постит саммари только в текущий чат за окно от последнего сброса
+    (планового или ad-hoc этого же чата). Регулярное воскресное расписание
+    не сдвигается; следующее ВС 21:00 МСК будет считать окно от этого
+    ad-hoc-момента — но только для этого чата, в других — от прошлого
+    воскресенья как обычно.
+    """
+    if message.from_user is None or message.bot is None:
+        return
+    if TELEGRAM_ADMIN_ID is None or message.from_user.id != TELEGRAM_ADMIN_ID:
+        return  # тихо: команда для одного человека, не светим её существование
+
+    now = datetime.now(UTC)
+    sent = await deal_weekly.post_adhoc(message.bot, message.chat.id, now)
+    if sent == 0:
+        await message.answer(
+            "📤 В этом чате с последнего сброса никто не играл — нечего показать."
+        )
+        return
+    # Сам саммари уже ушёл в этот же чат отдельным сообщением через post_adhoc;
+    # тихо подтверждаем админу (короткой реакцией), чтобы не дублировать.
+    await message.answer("✅ Сброс выполнен.")
 
 
 # ---------------------------------------------------------------------------

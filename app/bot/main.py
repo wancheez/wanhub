@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 
 from aiogram import Bot, Dispatcher
@@ -8,6 +9,7 @@ from app.bot.auth import ChatWhitelistMiddleware
 from app.bot.handlers import register_handlers
 from app.core.config import TELEGRAM_ADMIN_ID, TELEGRAM_BOT_TOKEN
 from app.services import deal_db
+from app.services.deal_weekly import weekly_summary_loop
 
 log = logging.getLogger("app")
 
@@ -16,10 +18,11 @@ NETWORK_TIMEOUT_S = 15
 bot: Bot | None = None
 dp: Dispatcher | None = None
 _polling_task: asyncio.Task | None = None
+_weekly_task: asyncio.Task | None = None
 
 
 async def start_bot() -> None:
-    global bot, dp, _polling_task
+    global bot, dp, _polling_task, _weekly_task
 
     log.info("start_bot: begin")
 
@@ -52,13 +55,24 @@ async def start_bot() -> None:
         dp.start_polling(bot, handle_signals=False),
         name="telegram-polling",
     )
+    _weekly_task = asyncio.create_task(
+        weekly_summary_loop(bot),
+        name="deal-weekly-summary",
+    )
     log.info("start_bot: ready")
 
 
 async def stop_bot() -> None:
-    global bot, dp, _polling_task
+    global bot, dp, _polling_task, _weekly_task
 
     log.info("stop_bot: begin")
+
+    if _weekly_task is not None:
+        _weekly_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+            await asyncio.wait_for(_weekly_task, timeout=5)
+        _weekly_task = None
+        log.info("stop_bot: weekly-summary task stopped")
 
     if _polling_task is not None and dp is not None:
         log.info("stop_bot: stopping polling")
