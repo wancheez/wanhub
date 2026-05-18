@@ -46,6 +46,7 @@ _CB_DEAL = "dl:d:"
 _CB_NO_DEAL = "dl:nd:"
 _CB_NEXT = "dl:nx:"
 _CB_CANCEL = "dl:x:"
+_CB_PERSONAL_VIEW = "dl:pv:"
 _CB_NOOP = "dl:noop"
 _PERSONAL_RANDOM = "r"  # значение CID для «случайный кейс»
 
@@ -56,6 +57,20 @@ _GRID_WIDTH: dict[int, int] = {
     22: 5,
     26: 6,
 }
+
+# Эмодзи для кнопок кейсов: фрукты, потом животные. Хватает на максимум
+# (26 кейсов); привязка детерминированная — кейс #k всегда обозначается
+# одной и той же эмодзи во всех сообщениях партии.
+_CASE_EMOJIS: tuple[str, ...] = (
+    "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🍒", "🍑",
+    "🍍", "🥝", "🥥",
+    "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐯", "🦁",
+    "🐮", "🐸", "🐵",
+)  # fmt: skip
+
+
+def _case_emoji(case_id: int) -> str:
+    return _CASE_EMOJIS[(case_id - 1) % len(_CASE_EMOJIS)]
 
 
 def _grid_sizes(button_count: int, width: int) -> tuple[int, ...]:
@@ -238,14 +253,14 @@ def _kb_case_grid(session: deal.DealSession, *, mode: str) -> InlineKeyboardMark
 def _case_button(session: deal.DealSession, case_id: int, *, mode: str) -> tuple[str, str]:
     """Лейбл и callback для одной кнопки сетки."""
     if mode == "personal":
-        return str(case_id), f"{_CB_PERSONAL}{session.chat_id}:{case_id}"
+        return _case_emoji(case_id), f"{_CB_PERSONAL}{session.chat_id}:{case_id}"
     # mode == "opening"; кейсы прошлых раундов отфильтрованы в _kb_case_grid.
     if case_id == session.personal_case_id:
-        return "👤", _CB_NOOP
+        return "👤", f"{_CB_PERSONAL_VIEW}{session.chat_id}"
     if case_id in session.current_round_opened:
         value = session.case_values[case_id]
         return _fmt_rub_short(value), _CB_NOOP
-    return str(case_id), f"{_CB_OPEN}{session.chat_id}:{case_id}"
+    return _case_emoji(case_id), f"{_CB_OPEN}{session.chat_id}:{case_id}"
 
 
 def _kb_banker(chat_id: int) -> InlineKeyboardMarkup:
@@ -307,10 +322,6 @@ def _rules_text() -> str:
         "подводит итоги недели: топ-3 по avg (мин. 3 партии), лучшая партия и "
         "поздравление чемпиона — после этого счёт обнуляется и стартует новая "
         "неделя.\n"
-        "\n"
-        "⚡ <b>Внеочередной сброс.</b> Админ может в любой момент написать "
-        "/dealsummary — бот опубликует промежуточные итоги в этом чате и "
-        "обнулит рейтинг прямо сейчас (только тут, другие чаты не задеты)."
     )
 
 
@@ -463,7 +474,10 @@ def _text_end_summary(session: deal.DealSession) -> str:
     )
     lines = [f"<b>🏁 Игра окончена</b> · {session.case_count} кейсов"]
     if personal is not None:
-        lines.append(f"Личный кейс: <b>{_fmt_rub(personal)}</b>")
+        assert session.personal_case_id is not None
+        lines.append(
+            f"Личный кейс {_case_emoji(session.personal_case_id)}: <b>{_fmt_rub(personal)}</b>"
+        )
     lines.append("")
     rows = sorted(
         session.players.values(),
@@ -823,7 +837,7 @@ async def on_pick_personal(cb: CallbackQuery) -> None:
         return
     assert isinstance(cb.message, Message)
     await _render(cb.message, session, edit=True)
-    await cb.answer(f"Личный кейс: #{case_id}")
+    await cb.answer(f"Личный кейс: {_case_emoji(case_id)}")
 
 
 @router.callback_query(F.data.startswith(_CB_OPEN))
@@ -874,7 +888,7 @@ async def on_open_case(cb: CallbackQuery) -> None:
     # просто перерисовываем: `_render_payload` сам подложит next-клаву, как
     # только `is_round_complete` стало True.
     await _render(cb.message, session, edit=True)
-    await cb.answer(f"Кейс #{case_id}: {_fmt_rub(value)}")
+    await cb.answer(f"Кейс {_case_emoji(case_id)}: {_fmt_rub(value)}")
 
 
 @router.callback_query(F.data.startswith(_CB_DEAL))
@@ -917,7 +931,17 @@ async def _handle_decision(
         await cb.answer("Ты уже вылетел или не в игре.")
         return
     if res is deal.DecisionResult.ALREADY_DECIDED:
-        await cb.answer("Ты уже решил в этом раунде.")
+        # Игроку кажется, что клик не засчитан: клавиатура общая, она снимается
+        # только когда определились ВСЕ активные — пока ждём остальных, кнопки
+        # ещё висят. Поясняем, что зафиксировано, и принудительно перерисовываем
+        # на случай, если прошлый edit_text был проглочен `_suppress_edit_noop`.
+        prev = session.round_decisions.get(cb.from_user.id)
+        prev_label = (
+            "✅ Сделка" if prev == "deal" else "❌ Не сделка" if prev == "no_deal" else "?"
+        )
+        if isinstance(cb.message, Message):
+            await _render(cb.message, session, edit=True)
+        await cb.answer(f"Ты уже выбрал: {prev_label}")
         return
     if res is deal.DecisionResult.WRONG_PHASE:
         await cb.answer("Сейчас не время решать.")
@@ -927,7 +951,7 @@ async def _handle_decision(
     # Перерисовываем: если все решили, `_render_payload` сам подложит
     # «⏭ Далее» — финал раунда инициирует любой игрок кликом, не автомат.
     await _render(cb.message, session, edit=True)
-    await cb.answer("Принято ✅" if choice == "deal" else "Принято ❌")
+    await cb.answer("✅ Сделка принята" if choice == "deal" else "❌ Не сделка принята")
 
 
 @router.callback_query(F.data.startswith(_CB_NEXT))
@@ -1005,6 +1029,26 @@ async def on_cancel(cb: CallbackQuery) -> None:
     with _suppress_edit_noop():
         await cb.message.edit_text("«Сделка» отменена.")
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith(_CB_PERSONAL_VIEW))
+async def on_personal_view(cb: CallbackQuery) -> None:
+    """Тык по «👤»: показать подсказку, что это закрытый до финала личный кейс."""
+    if cb.data is None:
+        await cb.answer()
+        return
+    chat_id = _parse_int_tail(cb.data, _CB_PERSONAL_VIEW)
+    if chat_id is None:
+        await cb.answer()
+        return
+    session = _session_for_cb(cb, chat_id)
+    if session is None or session.personal_case_id is None:
+        await cb.answer()
+        return
+    await cb.answer(
+        "👤 Личный кейс — закрыт до финала. Может оказаться джекпот!",
+        show_alert=False,
+    )
 
 
 @router.callback_query(F.data == _CB_NOOP)
