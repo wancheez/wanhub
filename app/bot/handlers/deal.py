@@ -257,7 +257,7 @@ def _kb_banker(chat_id: int) -> InlineKeyboardMarkup:
 
 
 def _kb_next(chat_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура «ждём стартера»: только ⏭ Далее (и Отмена)."""
+    """Клавиатура «ждём игрока»: только ⏭ Далее (и Отмена)."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="⏭ Далее", callback_data=f"{_CB_NEXT}{chat_id}"))
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{_CB_CANCEL}{chat_id}"))
@@ -349,7 +349,7 @@ def _text_opening(session: deal.DealSession) -> str:
     if remaining_to_open > 0:
         lines.append(f"Открыть в этом раунде: <b>{remaining_to_open}</b> из {target}")
     else:
-        lines.append("✅ Все кейсы раунда открыты. Стартер — жми <b>⏭ Далее</b>.")
+        lines.append("✅ Все кейсы раунда открыты. Любой игрок — жми <b>⏭ Далее</b>.")
     if active:
         lines.append("В игре: " + ", ".join(escape(n) for n in active))
     if dealt:
@@ -395,7 +395,7 @@ def _text_banker(session: deal.DealSession) -> str:
     if pending:
         lines.append("Ждём решение: " + ", ".join(escape(n) for n in pending))
     else:
-        lines.append("✅ Все решили. Стартер — жми <b>⏭ Далее</b>.")
+        lines.append("✅ Все решили. Любой игрок — жми <b>⏭ Далее</b>.")
     lines.append("")
     lines.append(_value_sidebar(session))
     return "\n".join(lines)
@@ -476,7 +476,7 @@ def _render_payload(session: deal.DealSession) -> tuple[str, InlineKeyboardMarku
     if phase is deal.DealPhase.PICK_PERSONAL:
         return _text_pick_personal(session), _kb_case_grid(session, mode="personal")
     if phase is deal.DealPhase.OPENING:
-        # Раунд закончен — кейсы кончились, ждём ⏭ Далее от стартера.
+        # Раунд закончен — кейсы кончились, ждём ⏭ Далее от любого игрока.
         if deal.is_round_complete(session):
             return _text_opening(session), _kb_next(session.chat_id)
         return _text_opening(session), _kb_case_grid(session, mode="opening")
@@ -770,11 +770,18 @@ async def on_open_case(cb: CallbackQuery) -> None:
     if res is deal.OpenResult.UNKNOWN_CASE:
         await cb.answer("Битый callback.", show_alert=True)
         return
+    if res is deal.OpenResult.ROUND_COMPLETE:
+        # Гонка: пока сообщение редактировалось, кто-то уже добил раунд.
+        # Перерисуем под актуальное состояние (кнопка «⏭ Далее»).
+        assert isinstance(cb.message, Message)
+        await _render(cb.message, session, edit=True)
+        await cb.answer("Раунд уже завершён — жми ⏭ Далее.")
+        return
 
     assert isinstance(cb.message, Message)
     value = session.case_values[case_id]
     # Раунд может закончиться этим открытием (`OK_END_OF_ROUND`), но переход
-    # к банкиру / финалу делает не автомат — стартер жмёт «⏭ Далее». Здесь
+    # к банкиру / финалу делает не автомат — любой игрок жмёт «⏭ Далее». Здесь
     # просто перерисовываем: `_render_payload` сам подложит next-клаву, как
     # только `is_round_complete` стало True.
     await _render(cb.message, session, edit=True)
@@ -829,14 +836,14 @@ async def _handle_decision(
 
     assert isinstance(cb.message, Message)
     # Перерисовываем: если все решили, `_render_payload` сам подложит
-    # «⏭ Далее» — финал раунда инициирует стартер кликом, не автомат.
+    # «⏭ Далее» — финал раунда инициирует любой игрок кликом, не автомат.
     await _render(cb.message, session, edit=True)
     await cb.answer("Принято ✅" if choice == "deal" else "Принято ❌")
 
 
 @router.callback_query(F.data.startswith(_CB_NEXT))
 async def on_next(cb: CallbackQuery) -> None:
-    """⏭ Далее — переход к следующей фазе. Только стартер, и только когда готово.
+    """⏭ Далее — переход к следующей фазе. Любой игрок партии, когда готово.
 
     OPENING → раунд завершён → банкер (или финал, если раунд последний).
     BANKER  → все решили → следующий OPENING (или финал, если все вылетели).
@@ -852,8 +859,8 @@ async def on_next(cb: CallbackQuery) -> None:
     if session is None:
         await cb.answer("Игра уже завершена.")
         return
-    if cb.from_user.id != session.starter_id:
-        await cb.answer("Только стартер.", show_alert=False)
+    if cb.from_user.id not in session.players:
+        await cb.answer("Только игроки этой партии.", show_alert=False)
         return
 
     assert isinstance(cb.message, Message)

@@ -152,6 +152,7 @@ class OpenResult(Enum):
     NOT_IN_GAME = "not_in_game"
     NOT_ACTIVE = "not_active"
     UNKNOWN_CASE = "unknown_case"
+    ROUND_COMPLETE = "round_complete"
 
 
 class DecisionResult(Enum):
@@ -326,13 +327,18 @@ def open_case(session: DealSession, user_id: int, case_id: int) -> OpenResult:
         return OpenResult.IS_PERSONAL
     if case_id in session.opened:
         return OpenResult.ALREADY_OPEN
+    # Защита от гонки: несколько игроков одновременно жмут кнопки на устаревшей
+    # клавиатуре, и сумма открытий превышает target раунда. Без этой проверки
+    # за раунд может открыться больше кейсов, чем расписано — и в одном из
+    # поздних раундов «открыть N» окажется невозможным (остался только личный).
+    target = session.round_schedule[session.round_idx]
+    if session.cases_opened_this_round >= target:
+        return OpenResult.ROUND_COMPLETE
 
     session.opened.add(case_id)
     session.current_round_opened.add(case_id)
     session.cases_opened_this_round += 1
 
-    # Конец раунда: открыто столько, сколько запланировано в schedule[round_idx]?
-    target = session.round_schedule[session.round_idx]
     if session.cases_opened_this_round >= target:
         return OpenResult.OK_END_OF_ROUND
     return OpenResult.OK
@@ -343,7 +349,15 @@ def is_round_complete(session: DealSession) -> bool:
         return False
     if session.round_idx >= len(session.round_schedule):
         return False
-    return session.cases_opened_this_round >= session.round_schedule[session.round_idx]
+    if session.cases_opened_this_round >= session.round_schedule[session.round_idx]:
+        return True
+    # Защитная сетка: если из-за прошлой гонки уже открыто всё, что можно (остался
+    # только личный кейс), раунд считаем завершённым — иначе игра зависнет.
+    if session.case_count is not None:
+        openable_left = session.case_count - 1 - len(session.opened)
+        if openable_left <= 0:
+            return True
+    return False
 
 
 def is_last_round(session: DealSession) -> bool:
