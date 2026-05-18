@@ -1,5 +1,5 @@
 import logging
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -34,12 +34,16 @@ def setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    file_handler = RotatingFileHandler(
+    # Ротация по дням: в полночь локального времени файл `app.log` закрывается,
+    # переименовывается в `app.log.YYYY-MM-DD` и создаётся новый. Храним 14
+    # последних дней — двухнедельное окно для дебага без расхода диска.
+    file_handler = TimedRotatingFileHandler(
         LOG_FILE,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
+        when="midnight",
+        backupCount=14,
         encoding="utf-8",
     )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
 

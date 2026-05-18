@@ -460,9 +460,7 @@ def _text_banker(session: deal.DealSession) -> str:
     if pending:
         lines.append("Ждём решение: " + ", ".join(escape(n) for n in pending))
     else:
-        lines.append(
-            f"✅ Все решили. <b>⏭ Далее</b> — любой игрок {_AUTO_ADVANCE_HINT}."
-        )
+        lines.append(f"✅ Все решили. <b>⏭ Далее</b> — любой игрок {_AUTO_ADVANCE_HINT}.")
     lines.append("")
     lines.append(_value_sidebar(session))
     return "\n".join(lines)
