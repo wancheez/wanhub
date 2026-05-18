@@ -1,23 +1,28 @@
-"""Skill «запусти игру»: текстовый триггер для /flags, /capitals и /quiz.
+"""Skill «запусти игру»: текстовый триггер для /flags, /capitals, /quiz и т.п.
 
 По аналогии с send_image: пользователь пишет «Чат, запусти квиз» — и бот
 запускает игру без ввода слэш-команды.
 
 - /flags и /capitals имеют один параметр (число вопросов) — стартуют сразу.
-- /quiz имеет ещё категорию и сложность — отдаём wizard'у (как при /quiz).
-  Если число вопросов уже названо в тексте — пропускаем первый шаг wizard'а
-  и сразу показываем выбор категории.
+- /quiz (LLM-генерация) имеет тему/число/сложность. Тема может быть задана
+  прямо в триггере: «запусти квиз по Гарри Поттеру». В этом случае мы
+  пробрасываем тему в llm_quiz и пропускаем экран выбора темы. Если темы
+  нет — показываем стандартный wizard с предустановленными темами.
+- /movie и /show всегда идут через свой wizard (популярность + число).
+- /deal стартует через своё лобби.
 
 Распознаём:
     «запусти квиз» / «давай сыграем в флаги» / «поиграем в столицы»
-    «квиз» / «флаги» / «столицы»                  (одно слово)
-    «запусти квиз на 10» / «флаги 10»             (с числом вопросов)
+    «квиз» / «флаги» / «столицы»                                 (одно слово)
+    «запусти квиз на 10» / «флаги 10»                            (с числом)
+    «запусти квиз по Гарри Поттеру» / «квиз про SQL на 10»       (с темой)
 """
 
 import logging
 import re
 from typing import Any
 
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app.core.config import DEFAULT_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS
@@ -39,18 +44,30 @@ _START_VERB_RE = (
     r"давай(?:\s+(?:сыграем|поиграем|запустим|играть))?)"
 )
 
+# Опциональная тема: «по/про/о/об <что угодно>». Non-greedy, чтобы хвост с
+# числом всё ещё мог совпасть.
+_TOPIC_RE = r"(?:\s+(?:по|про|о|об)\s+(.+?))?"
+
 # Опциональное число вопросов: «на 10», «10», «на 10 вопросов».
 _NUM_RE = r"(?:\s+(?:на\s+)?(\d+)(?:\s+вопрос\w*)?)?"
 
-# Полная фраза с глаголом: «запусти квиз», «давай сыграем в флаги на 10».
+# Полная фраза с глаголом: «запусти квиз», «давай сыграем в флаги на 10»,
+# «запусти квиз по Гарри Поттеру на 10».
+#   group(1) — название игры
+#   group(2) — опциональная тема (только для квиза имеет смысл)
+#   group(3) — опциональное число вопросов
 _PHRASE_RE = re.compile(
-    rf"^\s*{_START_VERB_RE}\s+(?:в\s+(?:игру\s+)?|игру\s+)?{_GAME_NOUN_RE}{_NUM_RE}"
+    rf"^\s*{_START_VERB_RE}\s+(?:в\s+(?:игру\s+)?|игру\s+)?{_GAME_NOUN_RE}"
+    rf"{_TOPIC_RE}{_NUM_RE}"
     r"\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 
-# Голое название игры: «квиз», «флаги 10».
-_BARE_RE = re.compile(rf"^\s*{_GAME_NOUN_RE}{_NUM_RE}\s*[.!?]*\s*$", re.IGNORECASE)
+# Голое название игры: «квиз», «флаги 10», «квиз про Python».
+_BARE_RE = re.compile(
+    rf"^\s*{_GAME_NOUN_RE}{_TOPIC_RE}{_NUM_RE}\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 
 
 def _resolve_game(word: str) -> str | None:
@@ -72,8 +89,10 @@ def _resolve_game(word: str) -> str | None:
 
 
 def extract_game_intent(text: str) -> dict[str, Any] | None:
-    """Если текст — просьба запустить игру, вернуть {'game': ..., 'num': int|None}.
+    """Если текст — просьба запустить игру, вернуть {game, topic, num}.
 
+    `topic` имеет смысл только для game="quiz" — для остальных игр поле
+    остаётся, но handle() его игнорирует.
     `num` = None означает «использовать дефолт». Невалидное число (вне
     диапазона) тоже схлопывается в None — лучше запустить игру с дефолтом,
     чем ничего не сделать.
@@ -87,16 +106,19 @@ def extract_game_intent(text: str) -> dict[str, Any] | None:
     if game is None:
         return None
 
+    topic_raw = m.group(2)
+    topic = topic_raw.strip() if topic_raw else None
+
     num: int | None = None
-    if m.group(2):
+    if m.group(3):
         try:
-            n = int(m.group(2))
+            n = int(m.group(3))
         except ValueError:
             return None
         if 1 <= n <= MAX_QUIZ_QUESTIONS:
             num = n
 
-    return {"game": game, "num": num}
+    return {"game": game, "topic": topic, "num": num}
 
 
 class StartGameSkill:
@@ -105,18 +127,18 @@ class StartGameSkill:
     def match(self, text: str) -> dict[str, Any] | None:
         return extract_game_intent(text)
 
-    async def handle(self, message: Message, params: dict[str, Any]) -> None:
+    async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
         # Lazy import: app.bot.handlers зависит от app.bot.skills (chat handler
         # зовёт try_skills), поэтому top-level импорт хендлера сюда даёт
         # циклический импорт. Внутри функции — уже инициализированы оба пакета.
         from app.bot.handlers.games import _send_question
+        from app.bot.handlers.llm_quiz import cmd_quiz, show_num_with_topic
         from app.bot.handlers.movie import (
             _num_keyboard as _movie_num_keyboard,
         )
         from app.bot.handlers.movie import (
             _popularity_keyboard as _movie_popularity_keyboard,
         )
-        from app.bot.handlers.trivia import _category_keyboard, _num_keyboard
 
         game_name: str = params["game"]
         chat_id = message.chat.id
@@ -127,22 +149,16 @@ class StartGameSkill:
             return
 
         if game_name == "quiz":
-            # У квиза есть категория/сложность — без wizard'а пользователю
-            # некомфортно (всегда «любая»). Если число вопросов уже названо
-            # в тексте — пропускаем первый шаг и сразу спрашиваем категорию.
-            if params["num"]:
-                num = params["num"]
-                await message.answer(
-                    f"<b>🎲 Open Trivia DB</b>\n{num} вопросов.\nКатегория?",
-                    parse_mode="HTML",
-                    reply_markup=_category_keyboard(starter_id, num),
-                )
+            # Если тему уже сказали («запусти квиз по гарри поттеру») —
+            # пропускаем экран выбора темы и сразу спрашиваем число.
+            # Иначе показываем стандартное меню /quiz (с предустановленными
+            # темами + «своя тема»). Число из триггера для wizard'а
+            # игнорируем — оно осмысленно только когда есть тема.
+            topic = params.get("topic")
+            if topic:
+                await show_num_with_topic(message, starter_id, topic, state)
             else:
-                await message.answer(
-                    "<b>🎲 Квиз Open Trivia</b>\nСколько вопросов?",
-                    parse_mode="HTML",
-                    reply_markup=_num_keyboard(starter_id),
-                )
+                await cmd_quiz(message, state)
             return
 
         if game_name == "movie":

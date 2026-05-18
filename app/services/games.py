@@ -1,9 +1,10 @@
 """In-memory state и логика игровых сессий.
 
-Поддерживаются три викторины: по флагам (FLAG), по столицам (CAPITAL) и
-общеобразовательная Open Trivia DB (TRIVIA). `Question` хранит уже
-отрендеренные строки + опциональный URL картинки — рантайм бота не знает
-о Country, Brand или trivia, он просто рисует то что лежит в `Question`.
+Поддерживаются четыре викторины: по флагам (FLAG), по столицам (CAPITAL),
+LLM-генерация по теме (LLM_QUIZ), и угадайки по кадрам (MOVIE/SHOW).
+`Question` хранит уже отрендеренные строки + опциональный URL картинки —
+рантайм бота не знает о Country или Movie, он просто рисует то что лежит
+в `Question`.
 
 Одна активная игра на чат. Состояние живёт в памяти процесса; рестарт
 прибивает все идущие игры.
@@ -20,16 +21,9 @@ from html import escape
 
 from app.services import movies_db, shows_db
 from app.services.countries import Country, get_countries
+from app.services.llm_quiz import GeneratedQuestion, LLMQuizFailed, generate_quiz
 from app.services.movies_db import MoviesDBUnavailable  # re-exported для удобства хендлера
 from app.services.shows_db import ShowsDBUnavailable  # re-exported для удобства хендлера
-from app.services.trivia import (
-    RawTrivia,
-    TranslatedTrivia,
-    TranslationFailed,
-    TriviaUnavailable,  # re-exported для удобства хендлера
-    fetch_trivia,
-    translate,
-)
 
 log = logging.getLogger("app")
 
@@ -39,12 +33,12 @@ __all__ = [
     "Game",
     "GameAlreadyRunning",
     "GameKind",
+    "LLMQuizFailed",
     "MoviesDBUnavailable",
     "NotEnoughItems",
     "Question",
     "ShowsDBUnavailable",
     "SubmitResult",
-    "TriviaUnavailable",
     "advance",
     "answered_names",
     "cancel_game",
@@ -54,9 +48,9 @@ __all__ = [
     "reset_state",
     "start_capital_game",
     "start_flag_game",
+    "start_llm_quiz_game",
     "start_movie_game",
     "start_show_game",
-    "start_trivia_game",
     "submit_answer",
 ]
 
@@ -64,7 +58,7 @@ __all__ = [
 class GameKind(Enum):
     FLAG = "flag"
     CAPITAL = "capital"
-    TRIVIA = "trivia"
+    LLM_QUIZ = "llm_quiz"
     MOVIE = "movie"
     SHOW = "show"
 
@@ -171,32 +165,26 @@ async def start_capital_game(chat_id: int, num_questions: int, starter_id: int) 
     return _register(chat_id, GameKind.CAPITAL, starter_id, questions)
 
 
-async def start_trivia_game(
+async def start_llm_quiz_game(
     chat_id: int,
     num_questions: int,
     starter_id: int,
     *,
-    category: int | None = None,
-    difficulty: str | None = None,
+    topic: str,
+    difficulty: str,
 ) -> Game:
-    """Игра «общая трivia из Open Trivia DB» с переводом на русский.
+    """Игра «квиз, сгенерированный LLM по произвольной теме».
 
-    При сбое перевода молча падаем на английский — лучше показать игру
-    на исходном языке, чем уронить весь /quiz. Сетевые ошибки опентdb
-    пробрасываем (TriviaUnavailable) — это уже неустранимо для игрока.
+    Источник вопросов — Claude (см. `app/services/llm_quiz.py`). Сетевые
+    и парсинговые ошибки пробрасываются как `LLMQuizFailed`.
     """
     if chat_id in _games:
         raise GameAlreadyRunning()
-    raw = await fetch_trivia(num_questions, category=category, difficulty=difficulty)
-    if len(raw) < num_questions:
+    generated = await generate_quiz(topic, difficulty, num_questions)
+    if len(generated) < num_questions:
         raise NotEnoughItems()
-    try:
-        translated = await translate(raw)
-    except TranslationFailed as e:
-        log.warning("trivia: translation failed, falling back to EN: %s", e)
-        translated = [_raw_as_translated(r) for r in raw]
-    questions = _build_trivia_questions(translated)
-    return _register(chat_id, GameKind.TRIVIA, starter_id, questions)
+    questions = _build_llm_quiz_questions(generated)
+    return _register(chat_id, GameKind.LLM_QUIZ, starter_id, questions)
 
 
 # Пул фильмов: уровень популярности → сколько верхних позиций берём из
@@ -519,37 +507,22 @@ def _country_question(
     )
 
 
-def _raw_as_translated(r: RawTrivia) -> TranslatedTrivia:
-    """Обернуть нетранслированный вопрос в TranslatedTrivia (EN-fallback)."""
-    incorrect = r.incorrect_answers
-    if len(incorrect) != 3:
-        # opentdb не должен такого присылать на type=multiple, но защитимся.
-        incorrect = [*incorrect, "", "", ""][:3]
-    return TranslatedTrivia(
-        category=r.category,
-        question=r.question,
-        options=(r.correct_answer, incorrect[0], incorrect[1], incorrect[2]),
-    )
+def _build_llm_quiz_questions(items: list[GeneratedQuestion]) -> list[Question]:
+    """Обернуть LLM-вопросы в `Question`.
 
-
-def _build_trivia_questions(items: list[TranslatedTrivia]) -> list[Question]:
-    """Перемешать варианты trivia-вопросов и обернуть в Question.
-
-    `TranslatedTrivia.options[0]` — правильный ответ (контракт сервиса
-    перевода). Здесь шаффлим и фиксируем новый correct_idx.
+    Варианты НЕ перемешиваются: модель уже зафиксировала
+    `correct_option_index` в нужной позиции, а её же инструкция требует
+    «Randomize Correct Placement» — то есть распределение по индексам уже
+    обеспечено. Лишний shuffle тут только перебил бы это распределение.
     """
     out: list[Question] = []
     for item in items:
-        opts = list(item.options)
-        correct_text = opts[0]
-        random.shuffle(opts)
-        correct_idx = opts.index(correct_text)
         out.append(
             Question(
-                prompt=escape(item.question),
-                options=tuple(escape(o) for o in opts),  # type: ignore[arg-type]
-                correct_idx=correct_idx,
-                category=item.category,
+                prompt=escape(item.question_text),
+                options=tuple(escape(o) for o in item.options),  # type: ignore[arg-type]
+                correct_idx=item.correct_option_index,
+                category=item.category or None,
             )
         )
     return out

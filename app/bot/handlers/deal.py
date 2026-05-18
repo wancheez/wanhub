@@ -660,9 +660,7 @@ async def cmd_dealsummary(message: Message) -> None:
     now = datetime.now(UTC)
     sent = await deal_weekly.post_adhoc(message.bot, message.chat.id, now)
     if sent == 0:
-        await message.answer(
-            "📤 В этом чате с последнего сброса никто не играл — нечего показать."
-        )
+        await message.answer("📤 В этом чате с последнего сброса никто не играл — нечего показать.")
         return
     # Сам саммари уже ушёл в этот же чат отдельным сообщением через post_adhoc;
     # тихо подтверждаем админу (короткой реакцией), чтобы не дублировать.
@@ -936,9 +934,7 @@ async def _handle_decision(
         # ещё висят. Поясняем, что зафиксировано, и принудительно перерисовываем
         # на случай, если прошлый edit_text был проглочен `_suppress_edit_noop`.
         prev = session.round_decisions.get(cb.from_user.id)
-        prev_label = (
-            "✅ Сделка" if prev == "deal" else "❌ Не сделка" if prev == "no_deal" else "?"
-        )
+        prev_label = "✅ Сделка" if prev == "deal" else "❌ Не сделка" if prev == "no_deal" else "?"
         if isinstance(cb.message, Message):
             await _render(cb.message, session, edit=True)
         await cb.answer(f"Ты уже выбрал: {prev_label}")

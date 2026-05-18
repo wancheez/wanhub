@@ -90,65 +90,82 @@ def test_no_match_empty_subject():
 
 
 def test_game_match_quiz_with_verb():
-    assert extract_game_intent("запусти квиз") == {"game": "quiz", "num": None}
+    assert extract_game_intent("запусти квиз") == {"game": "quiz", "topic": None, "num": None}
 
 
 def test_game_match_flags_with_play_phrase():
-    assert extract_game_intent("давай сыграем в флаги") == {"game": "flags", "num": None}
+    assert extract_game_intent("давай сыграем в флаги") == {
+        "game": "flags",
+        "topic": None,
+        "num": None,
+    }
 
 
 def test_game_match_capitals_with_poigraem():
-    assert extract_game_intent("поиграем в столицы") == {"game": "capitals", "num": None}
+    assert extract_game_intent("поиграем в столицы") == {
+        "game": "capitals",
+        "topic": None,
+        "num": None,
+    }
 
 
 def test_game_match_bare_quiz():
-    assert extract_game_intent("квиз") == {"game": "quiz", "num": None}
+    assert extract_game_intent("квиз") == {"game": "quiz", "topic": None, "num": None}
 
 
 def test_game_match_bare_flags():
-    assert extract_game_intent("флаги") == {"game": "flags", "num": None}
+    assert extract_game_intent("флаги") == {"game": "flags", "topic": None, "num": None}
 
 
 def test_game_match_bare_capitals():
-    assert extract_game_intent("столицы") == {"game": "capitals", "num": None}
+    assert extract_game_intent("столицы") == {"game": "capitals", "topic": None, "num": None}
 
 
 def test_game_match_with_num():
-    assert extract_game_intent("запусти квиз на 10") == {"game": "quiz", "num": 10}
+    assert extract_game_intent("запусти квиз на 10") == {"game": "quiz", "topic": None, "num": 10}
 
 
 def test_game_match_num_without_na():
-    assert extract_game_intent("флаги 7") == {"game": "flags", "num": 7}
+    assert extract_game_intent("флаги 7") == {"game": "flags", "topic": None, "num": 7}
 
 
 def test_game_match_num_with_word_voprosov():
     assert extract_game_intent("сыграем в столицы на 5 вопросов") == {
         "game": "capitals",
+        "topic": None,
         "num": 5,
     }
 
 
 def test_game_match_capitalized():
-    assert extract_game_intent("Запусти Квиз") == {"game": "quiz", "num": None}
+    assert extract_game_intent("Запусти Квиз") == {"game": "quiz", "topic": None, "num": None}
 
 
 def test_game_match_inflection():
     # «викторину» / «столицу» — другие падежи
-    assert extract_game_intent("давай викторину") == {"game": "quiz", "num": None}
-    assert extract_game_intent("запусти столицу") == {"game": "capitals", "num": None}
+    assert extract_game_intent("давай викторину") == {"game": "quiz", "topic": None, "num": None}
+    assert extract_game_intent("запусти столицу") == {
+        "game": "capitals",
+        "topic": None,
+        "num": None,
+    }
 
 
 def test_game_match_trailing_punct():
-    assert extract_game_intent("запусти квиз!") == {"game": "quiz", "num": None}
+    assert extract_game_intent("запусти квиз!") == {"game": "quiz", "topic": None, "num": None}
 
 
 def test_game_num_out_of_range_falls_back_to_default():
     # 999 > MAX_QUIZ_QUESTIONS — num схлопывается в None, игра пойдёт с дефолтом.
-    assert extract_game_intent("запусти квиз на 999") == {"game": "quiz", "num": None}
+    assert extract_game_intent("запусти квиз на 999") == {
+        "game": "quiz",
+        "topic": None,
+        "num": None,
+    }
 
 
 def test_game_num_zero_falls_back_to_default():
-    assert extract_game_intent("флаги 0") == {"game": "flags", "num": None}
+    assert extract_game_intent("флаги 0") == {"game": "flags", "topic": None, "num": None}
 
 
 def test_game_no_match_general_question():
@@ -170,7 +187,7 @@ def test_game_no_match_greeting():
 
 def test_game_skill_match_returns_dict():
     s = StartGameSkill()
-    assert s.match("запусти квиз") == {"game": "quiz", "num": None}
+    assert s.match("запусти квиз") == {"game": "quiz", "topic": None, "num": None}
 
 
 def test_game_skill_no_match_returns_none():
@@ -179,80 +196,139 @@ def test_game_skill_no_match_returns_none():
 
 
 def test_game_match_bare_film():
-    assert extract_game_intent("фильм") == {"game": "movie", "num": None}
+    assert extract_game_intent("фильм") == {"game": "movie", "topic": None, "num": None}
 
 
 def test_game_match_bare_kino():
-    assert extract_game_intent("кино") == {"game": "movie", "num": None}
+    assert extract_game_intent("кино") == {"game": "movie", "topic": None, "num": None}
 
 
 def test_game_match_bare_movie():
-    assert extract_game_intent("movie") == {"game": "movie", "num": None}
+    assert extract_game_intent("movie") == {"game": "movie", "topic": None, "num": None}
 
 
 def test_game_match_film_with_verb():
-    assert extract_game_intent("запусти фильм") == {"game": "movie", "num": None}
+    assert extract_game_intent("запусти фильм") == {"game": "movie", "topic": None, "num": None}
 
 
 def test_game_match_film_with_play_phrase():
-    assert extract_game_intent("давай сыграем в кино") == {"game": "movie", "num": None}
+    assert extract_game_intent("давай сыграем в кино") == {
+        "game": "movie",
+        "topic": None,
+        "num": None,
+    }
 
 
 def test_game_match_film_with_num():
-    assert extract_game_intent("фильм 5") == {"game": "movie", "num": 5}
+    assert extract_game_intent("фильм 5") == {"game": "movie", "topic": None, "num": 5}
 
 
 def test_game_match_film_inflection():
     # «фильмы» / «фильма» — другие падежи
-    assert extract_game_intent("запусти фильмы") == {"game": "movie", "num": None}
+    assert extract_game_intent("запусти фильмы") == {"game": "movie", "topic": None, "num": None}
 
 
 def test_game_match_bare_serial():
-    assert extract_game_intent("сериал") == {"game": "show", "num": None}
+    assert extract_game_intent("сериал") == {"game": "show", "topic": None, "num": None}
 
 
 def test_game_match_bare_show():
-    assert extract_game_intent("show") == {"game": "show", "num": None}
+    assert extract_game_intent("show") == {"game": "show", "topic": None, "num": None}
 
 
 def test_game_match_bare_series():
-    assert extract_game_intent("series") == {"game": "show", "num": None}
+    assert extract_game_intent("series") == {"game": "show", "topic": None, "num": None}
 
 
 def test_game_match_serial_with_verb():
-    assert extract_game_intent("запусти сериал") == {"game": "show", "num": None}
+    assert extract_game_intent("запусти сериал") == {"game": "show", "topic": None, "num": None}
 
 
 def test_game_match_serial_with_num():
-    assert extract_game_intent("сериал 10") == {"game": "show", "num": 10}
+    assert extract_game_intent("сериал 10") == {"game": "show", "topic": None, "num": 10}
 
 
 def test_game_match_serial_inflection():
-    assert extract_game_intent("давай сериалы") == {"game": "show", "num": None}
+    assert extract_game_intent("давай сериалы") == {"game": "show", "topic": None, "num": None}
 
 
 def test_game_match_bare_deal_ru():
-    assert extract_game_intent("сделка") == {"game": "deal", "num": None}
+    assert extract_game_intent("сделка") == {"game": "deal", "topic": None, "num": None}
 
 
 def test_game_match_bare_deal_en():
-    assert extract_game_intent("deal") == {"game": "deal", "num": None}
+    assert extract_game_intent("deal") == {"game": "deal", "topic": None, "num": None}
 
 
 def test_game_match_bare_deal_translit():
-    assert extract_game_intent("деал") == {"game": "deal", "num": None}
+    assert extract_game_intent("деал") == {"game": "deal", "topic": None, "num": None}
 
 
 def test_game_match_deal_with_verb():
-    assert extract_game_intent("запусти сделку") == {"game": "deal", "num": None}
+    assert extract_game_intent("запусти сделку") == {"game": "deal", "topic": None, "num": None}
 
 
 def test_game_match_deal_with_play_phrase():
-    assert extract_game_intent("давай сыграем в сделку") == {"game": "deal", "num": None}
+    assert extract_game_intent("давай сыграем в сделку") == {
+        "game": "deal",
+        "topic": None,
+        "num": None,
+    }
 
 
 def test_game_match_deal_inflection():
-    assert extract_game_intent("сделке") == {"game": "deal", "num": None}
+    assert extract_game_intent("сделке") == {"game": "deal", "topic": None, "num": None}
+
+
+# ----- Topic capture for /quiz -----
+
+
+def test_game_match_quiz_with_topic_po():
+    assert extract_game_intent("запусти квиз по гарри поттеру") == {
+        "game": "quiz",
+        "topic": "гарри поттеру",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_with_topic_pro():
+    assert extract_game_intent("запусти квиз про SQL") == {
+        "game": "quiz",
+        "topic": "SQL",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_with_topic_o():
+    assert extract_game_intent("запусти квиз о Python") == {
+        "game": "quiz",
+        "topic": "Python",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_with_topic_and_num():
+    assert extract_game_intent("запусти квиз про SQL на 10") == {
+        "game": "quiz",
+        "topic": "SQL",
+        "num": 10,
+    }
+
+
+def test_game_match_bare_quiz_with_topic():
+    assert extract_game_intent("квиз про Python") == {
+        "game": "quiz",
+        "topic": "Python",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_with_multiword_topic_and_num():
+    assert extract_game_intent("запусти квиз по истории СССР на 5 вопросов") == {
+        "game": "quiz",
+        "topic": "истории СССР",
+        "num": 5,
+    }
 
 
 # ----- ShowDealTopSkill -----

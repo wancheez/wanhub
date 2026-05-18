@@ -1,6 +1,6 @@
-"""Команды игр: /flags — флаги, /capitals — столицы, /quiz — Open Trivia DB.
+"""Команды игр: /flags — флаги, /capitals — столицы, /quiz — LLM-генерация.
 
-Команда /quiz запускается через wizard в `app/bot/handlers/trivia.py`,
+Команда /quiz запускается через wizard в `app/bot/handlers/llm_quiz.py`,
 который в финале зовёт `_send_question` отсюда.
 
 Состояние игры — в памяти процесса (`app.services.games`). Одна игра на чат.
@@ -36,7 +36,7 @@ CB_STOP = "flg:s"
 _CMD_NAMES: dict[games.GameKind, str] = {
     games.GameKind.FLAG: "/flags",
     games.GameKind.CAPITAL: "/capitals",
-    games.GameKind.TRIVIA: "/quiz",
+    games.GameKind.LLM_QUIZ: "/quiz",
 }
 
 

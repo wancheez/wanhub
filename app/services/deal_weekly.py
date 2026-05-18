@@ -33,8 +33,8 @@ log = logging.getLogger("app")
 __all__ = [
     "MIN_GAMES_FOR_AVG",
     "MSK",
-    "SummaryKind",
     "TOP_LIMIT",
+    "SummaryKind",
     "compose_summary",
     "effective_window_start_utc",
     "iso_utc",
@@ -199,9 +199,7 @@ def compose_summary(
     ]
 
     if top:
-        lines.append(
-            f"📊 <b>Победители по среднему выигрышу</b> (мин. {MIN_GAMES_FOR_AVG} игры):"
-        )
+        lines.append(f"📊 <b>Победители по среднему выигрышу</b> (мин. {MIN_GAMES_FOR_AVG} игры):")
         for i, row in enumerate(top):
             medal = _MEDALS[i] if i < len(_MEDALS) else "  "
             extra = f" · total {_fmt_rub(row.total)}" if i == 0 else ""

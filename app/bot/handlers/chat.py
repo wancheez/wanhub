@@ -6,6 +6,7 @@ import anthropic
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message,
     MessageOriginChat,
@@ -90,7 +91,7 @@ async def cmd_reset(message: Message) -> None:
 
 
 @router.message(Command("chat"))
-async def cmd_chat(message: Message) -> None:
+async def cmd_chat(message: Message, state: FSMContext) -> None:
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         await message.answer(
@@ -98,11 +99,11 @@ async def cmd_chat(message: Message) -> None:
             "Или начни сообщение со слова «Чат» — например: <i>Чат, расскажи анекдот</i>"
         )
         return
-    await _route(message, parts[1])
+    await _route(message, parts[1], state)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def chat_prefix(message: Message) -> None:
+async def chat_prefix(message: Message, state: FSMContext) -> None:
     text = message.text or ""
     is_private = message.chat.type == "private"
     body, had_prefix = extract_body(text, is_private)
@@ -112,12 +113,12 @@ async def chat_prefix(message: Message) -> None:
         if had_prefix:
             await message.answer("Чат — а дальше что? Напиши вопрос после слова «Чат».")
         return
-    await _route(message, body)
+    await _route(message, body, state)
 
 
-async def _route(message: Message, text: str) -> None:
+async def _route(message: Message, text: str, state: FSMContext) -> None:
     """Try local skills first (free, no LLM); fall through to Claude."""
-    if await try_skills(message, text):
+    if await try_skills(message, text, state):
         return
     await _do_chat(message, text)
 

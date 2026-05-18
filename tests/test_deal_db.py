@@ -255,15 +255,9 @@ def test_last_reset_before_combines_weekly_and_adhoc_for_chat(fresh_db: Path) ->
     assert deal_db.mark_adhoc_reset(42, "2026-05-14T15:00:00+00:00") is True
     assert deal_db.mark_weekly_reset("2026-05-17T18:00:00+00:00") is True
     # Строгий «<»: запрос на момент 17.05 18:00 не должен включать сам 17.05 18:00.
-    assert (
-        deal_db.last_reset_before(42, "2026-05-17T18:00:00+00:00")
-        == "2026-05-14T15:00:00+00:00"
-    )
+    assert deal_db.last_reset_before(42, "2026-05-17T18:00:00+00:00") == "2026-05-14T15:00:00+00:00"
     # На момент после — возвращается уже плановый 17.05 (он свежее, чем 14.05).
-    assert (
-        deal_db.last_reset_before(42, "2026-05-17T18:00:01+00:00")
-        == "2026-05-17T18:00:00+00:00"
-    )
+    assert deal_db.last_reset_before(42, "2026-05-17T18:00:01+00:00") == "2026-05-17T18:00:00+00:00"
 
 
 def test_last_reset_before_ignores_other_chats_adhoc(fresh_db: Path) -> None:
@@ -273,13 +267,11 @@ def test_last_reset_before_ignores_other_chats_adhoc(fresh_db: Path) -> None:
     deal_db.mark_adhoc_reset(100, "2026-05-15T12:00:00+00:00")
     # У чата 200 окно стартует с прошлого воскресенья (10.05), а не с 15.05.
     assert (
-        deal_db.last_reset_before(200, "2026-05-17T18:00:00+00:00")
-        == "2026-05-10T18:00:00+00:00"
+        deal_db.last_reset_before(200, "2026-05-17T18:00:00+00:00") == "2026-05-10T18:00:00+00:00"
     )
     # А у самого чата 100 — с его ad-hoc'а.
     assert (
-        deal_db.last_reset_before(100, "2026-05-17T18:00:00+00:00")
-        == "2026-05-15T12:00:00+00:00"
+        deal_db.last_reset_before(100, "2026-05-17T18:00:00+00:00") == "2026-05-15T12:00:00+00:00"
     )
 
 

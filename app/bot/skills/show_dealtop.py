@@ -14,6 +14,7 @@ import logging
 import re
 from typing import Any
 
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 log = logging.getLogger("app")
@@ -45,7 +46,8 @@ class ShowDealTopSkill:
     def match(self, text: str) -> dict[str, Any] | None:
         return extract_dealtop_intent(text)
 
-    async def handle(self, message: Message, params: dict[str, Any]) -> None:
+    async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
+        _ = state  # not used; FSM is wired only for skills that need it
         # Lazy import: handlers/deal.py зависит от skills (через try_skills),
         # top-level импорт сюда даёт цикл. Внутри функции — пакеты уже готовы.
         from app.bot.handlers.deal import cmd_dealtop

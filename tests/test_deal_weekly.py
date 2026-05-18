@@ -9,7 +9,6 @@ import pytest
 
 from app.services import deal_db, deal_weekly
 
-
 MSK = timezone(timedelta(hours=3))
 
 
@@ -70,33 +69,25 @@ def test_iso_utc_converts_non_utc() -> None:
 def test_next_boundary_from_monday() -> None:
     # Пн 11 мая 2026 12:00 МСК → ближайшее воскресенье 17 мая 21:00 МСК → 18:00 UTC.
     mon = datetime(2026, 5, 11, 12, 0, tzinfo=MSK)
-    assert deal_weekly.next_summary_boundary_utc(mon) == datetime(
-        2026, 5, 17, 18, 0, tzinfo=UTC
-    )
+    assert deal_weekly.next_summary_boundary_utc(mon) == datetime(2026, 5, 17, 18, 0, tzinfo=UTC)
 
 
 def test_next_boundary_just_before_sunday_21_msk() -> None:
     # ВС 17 мая 17:59 UTC == 20:59 МСК → сегодня в 21:00 МСК.
     almost = datetime(2026, 5, 17, 17, 59, tzinfo=UTC)
-    assert deal_weekly.next_summary_boundary_utc(almost) == datetime(
-        2026, 5, 17, 18, 0, tzinfo=UTC
-    )
+    assert deal_weekly.next_summary_boundary_utc(almost) == datetime(2026, 5, 17, 18, 0, tzinfo=UTC)
 
 
 def test_next_boundary_strict_at_boundary() -> None:
     # Ровно на границе → СТРОГО следующая (через 7 дней).
     on = datetime(2026, 5, 17, 18, 0, tzinfo=UTC)
-    assert deal_weekly.next_summary_boundary_utc(on) == datetime(
-        2026, 5, 24, 18, 0, tzinfo=UTC
-    )
+    assert deal_weekly.next_summary_boundary_utc(on) == datetime(2026, 5, 24, 18, 0, tzinfo=UTC)
 
 
 def test_next_boundary_after_sunday_21_msk() -> None:
     # ВС 18:01 UTC — следующая через 6+ дней.
     after = datetime(2026, 5, 17, 18, 1, tzinfo=UTC)
-    assert deal_weekly.next_summary_boundary_utc(after) == datetime(
-        2026, 5, 24, 18, 0, tzinfo=UTC
-    )
+    assert deal_weekly.next_summary_boundary_utc(after) == datetime(2026, 5, 24, 18, 0, tzinfo=UTC)
 
 
 def test_previous_boundary_returns_self_on_boundary() -> None:
@@ -139,9 +130,7 @@ def test_effective_window_picks_freshest_for_this_chat(fresh_db: Path) -> None:
     # В чате 42 окно стартует с ad-hoc'а.
     assert deal_weekly.effective_window_start_utc(42, end) == datetime.fromisoformat(adhoc)
     # В другом чате — с глобального weekly.
-    assert deal_weekly.effective_window_start_utc(99, end) == datetime.fromisoformat(
-        weekly_old
-    )
+    assert deal_weekly.effective_window_start_utc(99, end) == datetime.fromisoformat(weekly_old)
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +246,7 @@ class _FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send_message(
-        self, chat_id: int, text: str, **_: Any
-    ) -> None:  # noqa: ANN401
+    async def send_message(self, chat_id: int, text: str, **_: Any) -> None:
         self.sent.append((chat_id, text))
 
 
@@ -307,7 +294,7 @@ def test_post_weekly_after_adhoc_in_chat_uses_adhoc_window(fresh_db: Path) -> No
 
     sent = _asyncio.run(deal_weekly.post_weekly(bot, end))  # type: ignore[arg-type]
     assert sent == 2
-    by_chat = {c: t for c, t in bot.sent}
+    by_chat = dict(bot.sent)
     # Чат 1: видим 999, не видим 100.
     assert "999" in by_chat[1] and "100 ₽" not in by_chat[1]
     # Чат 2: видим 777.
@@ -412,11 +399,7 @@ def test_post_adhoc_does_not_affect_other_chats_window(fresh_db: Path) -> None:
     _asyncio.run(deal_weekly.post_adhoc(bot, 1, end_adhoc))  # type: ignore[arg-type]
     # У чата 1 окно теперь стартует с 15.05; у чата 2 — с 10.05.
     now = datetime(2026, 5, 16, 12, 0, tzinfo=UTC)
-    assert (
-        deal_weekly.effective_window_start_utc(1, now)
-        == end_adhoc
-    )
-    assert (
-        deal_weekly.effective_window_start_utc(2, now)
-        == datetime(2026, 5, 10, 18, 0, tzinfo=UTC)
+    assert deal_weekly.effective_window_start_utc(1, now) == end_adhoc
+    assert deal_weekly.effective_window_start_utc(2, now) == datetime(
+        2026, 5, 10, 18, 0, tzinfo=UTC
     )

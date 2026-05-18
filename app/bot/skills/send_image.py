@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Any
 
+from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, Message
 
 from app.services.image_query import rewrite_query
@@ -67,7 +68,8 @@ class SendImageSkill:
     def match(self, text: str) -> dict[str, Any] | None:
         return extract_image_intent(text)
 
-    async def handle(self, message: Message, params: dict[str, Any]) -> None:
+    async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
+        _ = state  # not used; FSM is wired only for skills that need it
         raw: str = params["raw"]
         fallback: str = params["fallback"]
 

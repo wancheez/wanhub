@@ -17,6 +17,7 @@ import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
 from app.core.config import DEAL_STATS_DB_PATH
 
 log = logging.getLogger("app")
