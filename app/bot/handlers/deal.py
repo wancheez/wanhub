@@ -513,13 +513,19 @@ def _text_end_summary(session: deal.DealSession) -> str:
 
 
 async def _render(message: Message, session: deal.DealSession, *, edit: bool) -> None:
-    """Отрисовать сообщение для текущей фазы (новое или edit)."""
+    """Отрисовать сообщение для текущей фазы (новое или edit).
+
+    Запоминает `current_message_id` сеанса — последнее «живое» сообщение, чтобы
+    повторный /deal мог снять с него клавиатуру при восстановлении.
+    """
     text, kb = _render_payload(session)
     if edit:
         with _suppress_edit_noop():
             await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        session.current_message_id = message.message_id
         return
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    session.current_message_id = sent.message_id
 
 
 async def _bump_phase(prev_message: Message, session: deal.DealSession) -> None:
@@ -645,12 +651,42 @@ async def _start_deal(message: Message) -> None:
     if games.get_game(chat_id) is not None:
         await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
         return
-    if deal.get_session(chat_id) is not None:
-        await message.answer("В этом чате уже идёт «Сделка». /dealcancel — чтобы прервать.")
+    existing = deal.get_session(chat_id)
+    if existing is not None:
+        await _resurface_existing(message, existing)
         return
     user = message.from_user
     user_name = user.full_name or user.username or str(user.id)
     session = deal.create_session(chat_id, user.id, user_name)
+    await _render(message, session, edit=False)
+
+
+async def _resurface_existing(message: Message, session: deal.DealSession) -> None:
+    """Повторный /deal при активной сессии: восстановить UI, не сбрасывая прогресс.
+
+    Снимаем клавиатуру со старого сообщения (чтобы клики на стейл-кнопках не
+    плодили «Не все ещё решили»), гасим устаревший таймер авто-перехода (он
+    указывал на старое сообщение) и публикуем свежее сообщение под текущую
+    фазу. Дальше игрок сам жмёт «⏭ Далее»/кейс/Deal-кнопку на новом сообщении.
+    """
+    _cancel_auto_advance(session.chat_id)
+    prev_msg_id = session.current_message_id
+    if prev_msg_id is not None and message.bot is not None:
+        try:
+            with _suppress_edit_noop():
+                await message.bot.edit_message_reply_markup(
+                    chat_id=session.chat_id,
+                    message_id=prev_msg_id,
+                    reply_markup=None,
+                )
+        except TelegramAPIError:
+            # Старого сообщения может уже не быть (удалили/слишком старое) —
+            # для восстановления это не критично, продолжаем.
+            log.warning(
+                "deal: chat=%d resurrect: could not strip kb from msg=%d",
+                session.chat_id,
+                prev_msg_id,
+            )
     await _render(message, session, edit=False)
 
 

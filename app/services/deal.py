@@ -218,6 +218,11 @@ class DealSession:
     current_offer: int | None = None
     round_decisions: dict[int, Literal["deal", "no_deal"]] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+    # message_id последнего активного сообщения партии (то, на котором сейчас
+    # «живая» клавиатура). Обновляется хендлером после каждой отрисовки. Нужно
+    # для восстановления: повторный /deal снимает клавиатуру со старого
+    # сообщения и публикует свежее под текущую фазу.
+    current_message_id: int | None = None
 
 
 _sessions: dict[int, DealSession] = {}
