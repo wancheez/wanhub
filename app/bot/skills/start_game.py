@@ -69,6 +69,20 @@ _BARE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Запасной паттерн для квиза: «квиз <тема>» без предлога —
+# «Чат, квиз программирование», «запусти квиз гарри поттер».
+# Только для квиз/викторина (для «флаги 10» число должно остаться числом),
+# и тема не может начинаться с цифры (иначе «квиз 10» съест 10 в тему).
+#   group(1) — название игры (всегда квиз/викторина)
+#   group(2) — тема
+#   group(3) — опциональное число вопросов
+_QUIZ_BARE_TOPIC_RE = re.compile(
+    rf"^\s*(?:{_START_VERB_RE}\s+(?:в\s+(?:игру\s+)?|игру\s+)?)?"
+    r"(квиз\w*|викторин\w*)\s+(?!\d)(.+?)"
+    rf"{_NUM_RE}\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def _resolve_game(word: str) -> str | None:
     """Привести слово к каноничному имени игры."""
@@ -98,7 +112,7 @@ def extract_game_intent(text: str) -> dict[str, Any] | None:
     чем ничего не сделать.
     """
     text = text.strip()
-    m = _PHRASE_RE.match(text) or _BARE_RE.match(text)
+    m = _PHRASE_RE.match(text) or _BARE_RE.match(text) or _QUIZ_BARE_TOPIC_RE.match(text)
     if not m:
         return None
 

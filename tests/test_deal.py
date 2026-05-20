@@ -13,37 +13,21 @@ def isolated_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Шкалы и расписания
+# Шкала и расписание
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("n", [16, 22, 26])
-def test_values_have_expected_length(n: int) -> None:
-    assert len(deal.values_for(n)) == n
+def test_values_have_expected_length() -> None:
+    assert len(deal.VALUES) == deal.CASE_COUNT
 
 
-@pytest.mark.parametrize(
-    "n,expected_top",
-    [(16, 1_000_000), (22, 2_000_000), (26, 3_000_000)],
-)
-def test_top_value_is_canonical(n: int, expected_top: int) -> None:
-    assert max(deal.values_for(n)) == expected_top
+def test_top_value_is_canonical() -> None:
+    assert max(deal.VALUES) == 3_000_000
 
 
-@pytest.mark.parametrize("n", [16, 22, 26])
-def test_schedule_sums_to_cases_minus_one(n: int) -> None:
+def test_schedule_sums_to_cases_minus_one() -> None:
     """В каждом раунде открывают какие-то кейсы, один (личный) остаётся."""
-    assert sum(deal.schedule_for(n)) == n - 1
-
-
-def test_values_for_unsupported_raises() -> None:
-    with pytest.raises(ValueError, match="unsupported"):
-        deal.values_for(10)
-
-
-def test_schedule_for_unsupported_raises() -> None:
-    with pytest.raises(ValueError, match="unsupported"):
-        deal.schedule_for(13)
+    assert sum(deal.SCHEDULE) == deal.CASE_COUNT - 1
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +131,11 @@ def test_join_outside_lobby_rejected() -> None:
 def test_start_after_lobby_with_players_ok() -> None:
     s = deal.create_session(1, 100, "Алиса")
     assert deal.start_after_lobby(s) is deal.StartResult.OK
-    assert s.phase is deal.DealPhase.PICK_CASES
+    assert s.phase is deal.DealPhase.PICK_PERSONAL
+    assert s.case_count == deal.CASE_COUNT
+    assert len(s.case_values) == deal.CASE_COUNT
+    assert set(s.case_values.values()) == set(deal.VALUES)
+    assert s.round_schedule == deal.SCHEDULE
 
 
 def test_cancel_session() -> None:
@@ -162,35 +150,9 @@ def test_cancel_session() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_set_case_count_populates_state() -> None:
-    s = deal.create_session(1, 100, "Алиса")
-    deal.start_after_lobby(s)
-    deal.set_case_count(s, 16)
-    assert s.case_count == 16
-    assert len(s.case_values) == 16
-    # Все 16 значений из шкалы покрыты ровно один раз.
-    assert set(s.case_values.values()) == set(deal.VALUES_16)
-    assert s.round_schedule == deal.SCHEDULE_16
-    assert s.phase is deal.DealPhase.PICK_PERSONAL
-
-
-def test_set_case_count_wrong_phase_raises() -> None:
-    s = deal.create_session(1, 100, "Алиса")
-    with pytest.raises(deal.WrongPhase):
-        deal.set_case_count(s, 16)
-
-
-def test_set_case_count_unsupported_raises() -> None:
-    s = deal.create_session(1, 100, "Алиса")
-    deal.start_after_lobby(s)
-    with pytest.raises(ValueError):
-        deal.set_case_count(s, 9)
-
-
 def test_set_personal_case_transitions_to_opening() -> None:
     s = deal.create_session(1, 100, "Алиса")
     deal.start_after_lobby(s)
-    deal.set_case_count(s, 16)
     deal.set_personal_case(s, 5)
     assert s.personal_case_id == 5
     assert s.phase is deal.DealPhase.OPENING
@@ -201,9 +163,8 @@ def test_set_personal_case_transitions_to_opening() -> None:
 def test_set_personal_case_out_of_range_raises() -> None:
     s = deal.create_session(1, 100, "Алиса")
     deal.start_after_lobby(s)
-    deal.set_case_count(s, 16)
     with pytest.raises(ValueError):
-        deal.set_personal_case(s, 17)
+        deal.set_personal_case(s, deal.CASE_COUNT + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +172,11 @@ def test_set_personal_case_out_of_range_raises() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _ready_game(chat_id: int = 1, case_count: int = 16, personal: int = 1) -> deal.DealSession:
-    """Лобби → PICK_CASES → PICK_PERSONAL → OPENING (round 0, ноль открыто)."""
+def _ready_game(chat_id: int = 1, personal: int = 1) -> deal.DealSession:
+    """Лобби → PICK_PERSONAL → OPENING (round 0, ноль открыто)."""
     s = deal.create_session(chat_id, 100, "Алиса")
     deal.join(s, 200, "Боб")
     deal.start_after_lobby(s)
-    deal.set_case_count(s, case_count)
     deal.set_personal_case(s, personal)
     return s
 
@@ -231,20 +191,21 @@ def test_open_case_marks_opened() -> None:
 
 def test_current_round_opened_resets_between_rounds() -> None:
     s = _ready_game()
-    # Раунд 0: открываем все 4 запланированных.
-    for cid in [2, 3, 4, 5]:
+    # Раунд 0: открываем все 6 запланированных (SCHEDULE[0] == 6).
+    first_round = [2, 3, 4, 5, 6, 7]
+    for cid in first_round:
         deal.open_case(s, 100, cid)
-    assert s.current_round_opened == {2, 3, 4, 5}
+    assert s.current_round_opened == set(first_round)
     deal.transition_to_banker(s)
     deal.submit_decision(s, 100, "no_deal")
     deal.submit_decision(s, 200, "no_deal")
     assert deal.finalize_banker(s) is deal.FinalizeResult.OK_NEXT_ROUND
-    # Новый раунд — текущие открытия пусты, но глобально 4 кейса всё ещё открыты.
+    # Новый раунд — текущие открытия пусты, но глобально 6 кейсов всё ещё открыты.
     assert s.current_round_opened == set()
-    assert s.opened == {2, 3, 4, 5}
-    deal.open_case(s, 100, 6)
-    assert s.current_round_opened == {6}
-    assert s.opened == {2, 3, 4, 5, 6}
+    assert s.opened == set(first_round)
+    deal.open_case(s, 100, 8)
+    assert s.current_round_opened == {8}
+    assert s.opened == set(first_round) | {8}
 
 
 def test_open_case_twice_returns_already_open() -> None:
@@ -272,7 +233,7 @@ def test_open_case_by_dealt_player_rejected() -> None:
 
 def test_open_case_unknown_id() -> None:
     s = _ready_game()
-    assert deal.open_case(s, 100, 99) is deal.OpenResult.UNKNOWN_CASE
+    assert deal.open_case(s, 100, 999) is deal.OpenResult.UNKNOWN_CASE
 
 
 def test_open_case_outside_opening_phase() -> None:
@@ -282,13 +243,13 @@ def test_open_case_outside_opening_phase() -> None:
 
 
 def test_open_case_end_of_round_signals() -> None:
-    """schedule_16[0] == 4 → четвёртое открытие подряд возвращает OK_END_OF_ROUND."""
+    """SCHEDULE[0] == 6 → шестое открытие подряд возвращает OK_END_OF_ROUND."""
     s = _ready_game()
-    # 1, 2, 3 — первые три открытия (личный = 1 запрещён в _ready_game(personal=1))
-    for i, cid in enumerate([2, 3, 4]):
+    # Личный = 1 запрещён в _ready_game(personal=1) → открываем 2..7.
+    for i, cid in enumerate([2, 3, 4, 5, 6]):
         res = deal.open_case(s, 100, cid)
         assert res is deal.OpenResult.OK, f"open #{i + 1} {cid}: {res}"
-    res = deal.open_case(s, 100, 5)
+    res = deal.open_case(s, 100, 7)
     assert res is deal.OpenResult.OK_END_OF_ROUND
     assert deal.is_round_complete(s) is True
     assert deal.is_last_round(s) is False
@@ -298,9 +259,9 @@ def test_remaining_values_excludes_opened() -> None:
     s = _ready_game()
     deal.open_case(s, 100, 2)
     rem = deal.remaining_values(s)
-    # case 2 — это VALUES_16[1] = 5
+    # case 2 — это VALUES[1] = 5
     assert 5 not in rem
-    assert len(rem) == 15  # 16 - 1 открытый
+    assert len(rem) == deal.CASE_COUNT - 1  # один открытый
 
 
 # ---------------------------------------------------------------------------
@@ -314,9 +275,12 @@ def _complete_round(session: deal.DealSession, case_ids: list[int]) -> None:
         deal.open_case(session, 100, cid)
 
 
+_FIRST_ROUND_OPENS: list[int] = [2, 3, 4, 5, 6, 7]  # SCHEDULE[0] == 6, личный = 1
+
+
 def test_transition_to_banker_sets_offer_and_phase() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     offer = deal.transition_to_banker(s)
     assert s.phase is deal.DealPhase.BANKER
     assert s.current_offer == offer
@@ -332,7 +296,7 @@ def test_transition_to_banker_wrong_phase() -> None:
 
 def test_submit_decision_accepted_and_tracked() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     deal.transition_to_banker(s)
     res = deal.submit_decision(s, 100, "deal")
     assert res is deal.DecisionResult.ACCEPTED
@@ -341,7 +305,7 @@ def test_submit_decision_accepted_and_tracked() -> None:
 
 def test_submit_decision_already_decided() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     deal.transition_to_banker(s)
     deal.submit_decision(s, 100, "deal")
     assert deal.submit_decision(s, 100, "no_deal") is deal.DecisionResult.ALREADY_DECIDED
@@ -354,7 +318,7 @@ def test_submit_decision_outside_banker_phase() -> None:
 
 def test_all_active_decided_correctly() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     deal.transition_to_banker(s)
     deal.submit_decision(s, 100, "deal")
     assert deal.all_active_decided(s) is False
@@ -364,7 +328,7 @@ def test_all_active_decided_correctly() -> None:
 
 def test_finalize_banker_mixed_decisions() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     offer = deal.transition_to_banker(s)
     deal.submit_decision(s, 100, "deal")
     deal.submit_decision(s, 200, "no_deal")
@@ -381,7 +345,7 @@ def test_finalize_banker_mixed_decisions() -> None:
 
 def test_finalize_banker_all_deal_finishes_game() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     offer = deal.transition_to_banker(s)
     deal.submit_decision(s, 100, "deal")
     deal.submit_decision(s, 200, "deal")
@@ -404,17 +368,17 @@ def test_finalize_banker_wrong_phase() -> None:
 
 def test_full_no_deal_run_ends_with_personal_value() -> None:
     """Если оба игрока всю партию говорят No Deal — оба получают значение личного кейса."""
-    s = _ready_game(case_count=16, personal=10)
-    # Полный пробег по SCHEDULE_16 = [4,3,2,1,1,1,1,1,1].
-    # Кейсы 1..16, личный — 10. Доступны для открытия: 1..9, 11..16 = 15 шт.
-    open_pool = [c for c in range(1, 17) if c != 10]
-    assert sum(deal.SCHEDULE_16) == 15 == len(open_pool)
+    personal = 10
+    s = _ready_game(personal=personal)
+    # Полный пробег по SCHEDULE. Кейсы 1..CASE_COUNT, личный исключён.
+    open_pool = [c for c in range(1, deal.CASE_COUNT + 1) if c != personal]
+    assert sum(deal.SCHEDULE) == deal.CASE_COUNT - 1 == len(open_pool)
     cursor = 0
-    for round_idx, target in enumerate(deal.SCHEDULE_16):
+    for round_idx, target in enumerate(deal.SCHEDULE):
         for _ in range(target):
             deal.open_case(s, 100, open_pool[cursor])
             cursor += 1
-        if round_idx == len(deal.SCHEDULE_16) - 1:
+        if round_idx == len(deal.SCHEDULE) - 1:
             # Последний раунд — без банкира.
             deal.end_game_reveal(s)
             break
@@ -424,7 +388,7 @@ def test_full_no_deal_run_ends_with_personal_value() -> None:
         deal.finalize_banker(s)
 
     assert s.phase is deal.DealPhase.FINISHED
-    personal_value = s.case_values[10]
+    personal_value = s.case_values[personal]
     assert s.players[100].status == "won_final"
     assert s.players[100].winnings == personal_value
     assert s.players[200].winnings == personal_value
@@ -438,7 +402,7 @@ def test_end_game_reveal_wrong_phase() -> None:
 
 def test_end_game_reveal_before_last_round() -> None:
     s = _ready_game()
-    _complete_round(s, [2, 3, 4, 5])
+    _complete_round(s, _FIRST_ROUND_OPENS)
     # Раунд 0 завершён, но это не последний.
     with pytest.raises(deal.WrongPhase):
         deal.end_game_reveal(s)

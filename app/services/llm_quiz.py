@@ -27,7 +27,7 @@ LLM_QUIZ_MAX_TOKENS = 8192
 NUM_CHOICES: tuple[int, ...] = (5, 10, 20)
 DIFFICULTIES: tuple[str, ...] = ("any", "easy", "medium", "hard")
 
-_PROMPT_TEMPLATE = load_prompt("llm_quiz")
+_SYSTEM_PROMPT = load_prompt("llm_quiz")
 
 
 class LLMQuizFailed(Exception):
@@ -73,20 +73,10 @@ def _strip_markdown_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _build_system_prompt(topic: str, difficulty: str, language: str, num_questions: int) -> str:
-    return (
-        _PROMPT_TEMPLATE.replace("{{TOPIC}}", topic)
-        .replace("{{DIFFICULTY}}", difficulty)
-        .replace("{{LANGUAGE}}", language)
-        .replace("{{NUM_QUESTIONS}}", str(num_questions))
-    )
-
-
 async def generate_quiz(
     topic: str,
     difficulty: str,
     num_questions: int,
-    language: str = "Russian",
 ) -> list[GeneratedQuestion]:
     """Сгенерировать квиз из `num_questions` вопросов по теме `topic`.
 
@@ -101,8 +91,12 @@ async def generate_quiz(
     if not topic:
         raise ValueError("empty topic")
 
-    system = _build_system_prompt(topic, difficulty, language, num_questions)
-    user_msg = "Generate the quiz now."
+    user_msg = (
+        f"TOPIC: {topic}\n"
+        f"DIFFICULTY: {difficulty}\n"
+        f"NUM_QUESTIONS: {num_questions}\n"
+        "Generate the quiz now."
+    )
 
     client = _get_client()
     t_start = time.monotonic()
@@ -110,7 +104,13 @@ async def generate_quiz(
         response = await client.messages.create(
             model=LLM_QUIZ_MODEL,
             max_tokens=LLM_QUIZ_MAX_TOKENS,
-            system=system,
+            system=[
+                {
+                    "type": "text",
+                    "text": _SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": user_msg}],
         )
     except APIError as e:

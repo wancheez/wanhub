@@ -367,6 +367,46 @@ def test_game_match_quiz_with_multiword_topic_and_num():
     }
 
 
+def test_game_match_bare_quiz_topic_no_preposition():
+    # Production bug: «Чат квиз программирование» падал в LLM,
+    # потому что _BARE_RE требовал предлог перед темой.
+    assert extract_game_intent("квиз программирование") == {
+        "game": "quiz",
+        "topic": "программирование",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_topic_no_preposition_multiword():
+    assert extract_game_intent("квиз гарри поттер") == {
+        "game": "quiz",
+        "topic": "гарри поттер",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_topic_no_preposition_with_verb():
+    assert extract_game_intent("запусти квиз программирование") == {
+        "game": "quiz",
+        "topic": "программирование",
+        "num": None,
+    }
+
+
+def test_game_match_quiz_topic_no_preposition_with_num():
+    assert extract_game_intent("квиз программирование 10") == {
+        "game": "quiz",
+        "topic": "программирование",
+        "num": 10,
+    }
+
+
+def test_game_no_match_bare_topic_for_flags():
+    # Тема без предлога — только для квиза. «флаги программирование»
+    # не должно ложно матчиться (там нет валидной семантики темы).
+    assert extract_game_intent("флаги программирование") is None
+
+
 # ----- ShowDealTopSkill -----
 
 

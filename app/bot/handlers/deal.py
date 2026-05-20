@@ -39,8 +39,8 @@ log = logging.getLogger("app")
 # не задели текущий. Длинные/короткие префиксы дисамбигированы (нет
 # конфликта `dl:n:` ↔ `dl:nd:`).
 _CB_JOIN = "dl:j:"
+_CB_DECLINE = "dl:dc:"
 _CB_START = "dl:s:"
-_CB_CASES = "dl:cc:"
 _CB_PERSONAL = "dl:p:"
 _CB_OPEN = "dl:o:"
 _CB_DEAL = "dl:d:"
@@ -51,17 +51,13 @@ _CB_PERSONAL_VIEW = "dl:pv:"
 _CB_NOOP = "dl:noop"
 _PERSONAL_RANDOM = "r"  # значение CID для «случайный кейс»
 
-# Базовая ширина grid'а для разных размеров игры. По мере открытия кейсы
-# исчезают с клавиатуры; ряды сами «сужаются», но ширина остаётся постоянной.
-_GRID_WIDTH: dict[int, int] = {
-    16: 4,
-    22: 5,
-    26: 6,
-}
+# Ширина grid'а кейсов. По мере открытия кейсы исчезают с клавиатуры;
+# ряды сами «сужаются», но ширина остаётся постоянной.
+_GRID_WIDTH = 6
 
-# Эмодзи для кнопок кейсов: фрукты, потом животные. Хватает на максимум
-# (26 кейсов); привязка детерминированная — кейс #k всегда обозначается
-# одной и той же эмодзи во всех сообщениях партии.
+# Эмодзи для кнопок кейсов: фрукты, потом животные. Хватает на 26 кейсов;
+# привязка детерминированная — кейс #k всегда обозначается одной и той же
+# эмодзи во всех сообщениях партии.
 _CASE_EMOJIS: tuple[str, ...] = (
     "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🍒", "🍑",
     "🍍", "🥝", "🥥",
@@ -202,20 +198,12 @@ def _value_table_expandable(session: deal.DealSession, opened_values: set[int]) 
 def _kb_lobby(chat_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✋ Присоединиться", callback_data=f"{_CB_JOIN}{chat_id}")
+        InlineKeyboardButton(text="🚫 Отказаться", callback_data=f"{_CB_DECLINE}{chat_id}"),
+        InlineKeyboardButton(text="✋ Присоединиться", callback_data=f"{_CB_JOIN}{chat_id}"),
     )
     builder.row(
         InlineKeyboardButton(text="▶️ Старт (стартер)", callback_data=f"{_CB_START}{chat_id}")
     )
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{_CB_CANCEL}{chat_id}"))
-    return builder.as_markup()
-
-
-def _kb_pick_cases(chat_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for n in deal.SUPPORTED_CASE_COUNTS:
-        builder.button(text=str(n), callback_data=f"{_CB_CASES}{chat_id}:{n}")
-    builder.adjust(len(deal.SUPPORTED_CASE_COUNTS))
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{_CB_CANCEL}{chat_id}"))
     return builder.as_markup()
 
@@ -230,7 +218,7 @@ def _kb_case_grid(session: deal.DealSession, *, mode: str) -> InlineKeyboardMark
         сайдбаре, дублировать кнопкой смысла нет).
     """
     assert session.case_count is not None
-    width = _GRID_WIDTH[session.case_count]
+    width = _GRID_WIDTH
     builder = InlineKeyboardBuilder()
 
     visible_buttons = 0
@@ -300,8 +288,8 @@ def _rules_text() -> str:
     return (
         "<b>📜 Правила «Сделка или нет»</b>\n"
         "\n"
-        "🎰 <b>Стол.</b> На столе 16 / 22 / 26 кейсов. В каждом спрятана сумма "
-        "из заранее известной шкалы (от 1 ₽ до 1–3 млн ₽). Какая сумма в каком "
+        "🎰 <b>Стол.</b> На столе 26 кейсов. В каждом спрятана сумма из "
+        "заранее известной шкалы (от 1 ₽ до 3 млн ₽). Какая сумма в каком "
         "кейсе — никто не знает.\n"
         "\n"
         "👤 <b>Личный кейс.</b> Стартер выбирает один кейс — он остаётся "
@@ -340,6 +328,11 @@ def _text_lobby(session: deal.DealSession) -> str:
         "<b>💼 Сделка или нет</b>",
         f"Стартер: <b>{escape(session.starter_name)}</b>",
         f"В лобби: {names}",
+    ]
+    if session.declined:
+        declined = ", ".join(escape(n) for n in session.declined.values())
+        lines.append(f"🚫 Отказались: {declined}")
+    lines += [
         "",
         "Жмите «✋ Присоединиться». Когда все готовы — стартер нажимает «▶️ Старт».",
         "",
@@ -347,15 +340,6 @@ def _text_lobby(session: deal.DealSession) -> str:
         f"<blockquote expandable>{_rules_text()}</blockquote>",
     ]
     return "\n".join(lines)
-
-
-def _text_pick_cases(session: deal.DealSession) -> str:
-    names = ", ".join(escape(p.name) for p in session.players.values())
-    return (
-        "<b>💼 Сделка или нет</b>\n"
-        f"Игроки: {names}\n"
-        f"<b>{escape(session.starter_name)}</b>, сколько кейсов на столе?"
-    )
 
 
 def _text_pick_personal(session: deal.DealSession) -> str:
@@ -370,26 +354,32 @@ def _text_pick_personal(session: deal.DealSession) -> str:
 
 
 def _opens_by_player_line(session: deal.DealSession) -> str | None:
-    """Строка «👤 Имя — 100к · 5к, …» по `current_round_opened_by`. None, если пусто."""
+    """Строка «👤 Имя — 100к 🍎 · 5к 🐼, …» по `current_round_opened_by`.
+
+    Рядом с каждой открытой суммой — эмодзи того кейса, который игрок вскрыл:
+    проще соотнести «кто что показал» со столом. None, если пусто.
+    """
     if not session.current_round_opened_by:
         return None
-    per_player: dict[int, list[int]] = {}
+    per_player: dict[int, list[tuple[int, int]]] = {}
     for case_id, uid in session.current_round_opened_by.items():
         value = session.case_values.get(case_id)
         if value is None:
             continue
-        per_player.setdefault(uid, []).append(value)
+        per_player.setdefault(uid, []).append((value, case_id))
     if not per_player:
         return None
-    # Сортируем игроков по убыванию числа открытий (затем по имени), а суммы
-    # внутри — по убыванию: крупные впереди читаются легче.
+    # Сортируем игроков по самому крупному вскрытому ими кейсу (по убыванию):
+    # сразу видно, кто «слил» самые большие суммы. Тай-брейк — по имени.
+    # Внутри игрока — по убыванию: крупные впереди читаются легче.
     ranked = sorted(
         per_player.items(),
-        key=lambda kv: (-len(kv[1]), _player_name(session, kv[0]).lower()),
+        key=lambda kv: (-max(v for v, _ in kv[1]), _player_name(session, kv[0]).lower()),
     )
     parts: list[str] = []
-    for uid, values in ranked:
-        sums = " · ".join(_fmt_rub_compact(v) for v in sorted(values, reverse=True))
+    for uid, opens in ranked:
+        sorted_opens = sorted(opens, key=lambda vc: vc[0], reverse=True)
+        sums = " · ".join(f"{_fmt_rub_compact(v)} {_case_emoji(c)}" for v, c in sorted_opens)
         parts.append(f"{escape(_player_name(session, uid))} — {sums}")
     return "👤 " + "; ".join(parts)
 
@@ -611,8 +601,6 @@ def _render_payload(session: deal.DealSession) -> tuple[str, InlineKeyboardMarku
     phase = session.phase
     if phase is deal.DealPhase.LOBBY:
         return _text_lobby(session), _kb_lobby(session.chat_id)
-    if phase is deal.DealPhase.PICK_CASES:
-        return _text_pick_cases(session), _kb_pick_cases(session.chat_id)
     if phase is deal.DealPhase.PICK_PERSONAL:
         return _text_pick_personal(session), _kb_case_grid(session, mode="personal")
     if phase is deal.DealPhase.OPENING:
@@ -845,6 +833,33 @@ async def on_join(cb: CallbackQuery) -> None:
     await cb.answer("Принято ✅")
 
 
+@router.callback_query(F.data.startswith(_CB_DECLINE))
+async def on_decline(cb: CallbackQuery) -> None:
+    if cb.data is None or cb.from_user is None:
+        await cb.answer()
+        return
+    chat_id = _parse_int_tail(cb.data, _CB_DECLINE)
+    if chat_id is None:
+        await cb.answer("Битый callback.", show_alert=True)
+        return
+    session = _session_for_cb(cb, chat_id)
+    if session is None:
+        await cb.answer("Игра уже завершена.")
+        return
+    user = cb.from_user
+    name = user.full_name or user.username or str(user.id)
+    res = deal.decline(session, user.id, name)
+    if res is deal.DeclineResult.NOT_IN_LOBBY:
+        await cb.answer("Лобби уже закрыто.")
+        return
+    if res is deal.DeclineResult.ALREADY_DECLINED:
+        await cb.answer("Ты уже отказался.")
+        return
+    assert isinstance(cb.message, Message)
+    await _render(cb.message, session, edit=True)
+    await cb.answer("Принято: ты не играешь 🚫")
+
+
 @router.callback_query(F.data.startswith(_CB_START))
 async def on_start(cb: CallbackQuery) -> None:
     if cb.data is None or cb.from_user is None:
@@ -873,36 +888,6 @@ async def on_start(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith(_CB_CASES))
-async def on_pick_cases(cb: CallbackQuery) -> None:
-    if cb.data is None or cb.from_user is None:
-        await cb.answer()
-        return
-    parsed = _parse_two_ints(cb.data, _CB_CASES)
-    if parsed is None:
-        await cb.answer("Битый callback.", show_alert=True)
-        return
-    chat_id, n = parsed
-    session = _session_for_cb(cb, chat_id)
-    if session is None:
-        await cb.answer("Игра уже завершена.")
-        return
-    if cb.from_user.id != session.starter_id:
-        await cb.answer("Только стартер.", show_alert=False)
-        return
-    if n not in deal.SUPPORTED_CASE_COUNTS:
-        await cb.answer("Битый callback.", show_alert=True)
-        return
-    try:
-        deal.set_case_count(session, n)
-    except deal.WrongPhase:
-        await cb.answer("Уже выбрано.")
-        return
-    assert isinstance(cb.message, Message)
-    await _render(cb.message, session, edit=True)
-    await cb.answer()
-
-
 @router.callback_query(F.data.startswith(_CB_PERSONAL))
 async def on_pick_personal(cb: CallbackQuery) -> None:
     if cb.data is None or cb.from_user is None:
@@ -925,9 +910,7 @@ async def on_pick_personal(cb: CallbackQuery) -> None:
     if cb.from_user.id != session.starter_id:
         await cb.answer("Только стартер.", show_alert=False)
         return
-    if session.case_count is None:
-        await cb.answer("Сначала выбери число кейсов.", show_alert=True)
-        return
+    assert session.case_count is not None
 
     if raw_case == _PERSONAL_RANDOM:
         import random

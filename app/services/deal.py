@@ -26,10 +26,12 @@ from typing import Literal
 log = logging.getLogger("app")
 
 __all__ = [
-    "DEFAULT_CASE_COUNT",
-    "SUPPORTED_CASE_COUNTS",
+    "CASE_COUNT",
+    "SCHEDULE",
+    "VALUES",
     "DealPhase",
     "DealSession",
+    "DeclineResult",
     "DecisionResult",
     "JoinResult",
     "OpenResult",
@@ -42,6 +44,7 @@ __all__ = [
     "banker_offer",
     "cancel_session",
     "create_session",
+    "decline",
     "end_game_reveal",
     "finalize_banker",
     "get_session",
@@ -51,13 +54,10 @@ __all__ = [
     "open_case",
     "remaining_values",
     "reset_state",
-    "schedule_for",
-    "set_case_count",
     "set_personal_case",
     "start_after_lobby",
     "submit_decision",
     "transition_to_banker",
-    "values_for",
 ]
 
 
@@ -65,56 +65,21 @@ __all__ = [
 # Шкалы и расписания
 # ---------------------------------------------------------------------------
 
-# Канонические рублевые шкалы — лог-распределение, как в ТВ-формате.
-# Все три набора имеют свой «top prize»: 1М / 2М / 3М.
-VALUES_16: list[int] = [
-    1, 5, 10, 25, 50, 100, 500, 1_000,
-    5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000,
-]  # fmt: skip
-
-VALUES_22: list[int] = [
-    1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000,
-    10_000, 25_000, 50_000, 100_000, 200_000, 300_000, 400_000,
-    500_000, 750_000, 1_000_000, 2_000_000,
-]  # fmt: skip
-
-VALUES_26: list[int] = [
+# Канонический рублёвый набор — лог-распределение, как в ТВ-формате.
+# Топ-приз — 3М ₽.
+VALUES: list[int] = [
     1, 5, 10, 25, 50, 75, 100, 200, 300, 400, 500, 750, 1_000,
     5_000, 10_000, 25_000, 50_000, 75_000, 100_000, 200_000, 300_000,
     400_000, 500_000, 750_000, 1_000_000, 3_000_000,
 ]  # fmt: skip
 
-# Расписания раундов: сколько кейсов открывается в каждом раунде.
-# Сумма == case_count - 1 (один кейс — личный, до конца закрыт).
-# Длина расписания = всего раундов; банкер появляется ПЕРЕД всеми
-# раундами кроме первого: фактически после каждого раунда, кроме
+# Расписание раундов: сколько кейсов открывается в каждом раунде.
+# Сумма == CASE_COUNT - 1 (один кейс — личный, до конца закрыт).
+# Длина расписания = всего раундов; после каждого раунда, кроме
 # последнего, есть фаза BANKER.
-SCHEDULE_16: list[int] = [4, 3, 2, 1, 1, 1, 1, 1, 1]  # sum=15
-SCHEDULE_22: list[int] = [6, 5, 4, 2, 1, 1, 1, 1]  # sum=21
-SCHEDULE_26: list[int] = [6, 5, 4, 3, 2, 1, 1, 1, 1, 1]  # sum=25
+SCHEDULE: list[int] = [6, 5, 4, 3, 2, 1, 1, 1, 1, 1]  # sum=25
 
-SUPPORTED_CASE_COUNTS: tuple[int, int, int] = (16, 22, 26)
-DEFAULT_CASE_COUNT: int = 22
-
-
-def values_for(case_count: int) -> list[int]:
-    if case_count == 16:
-        return list(VALUES_16)
-    if case_count == 22:
-        return list(VALUES_22)
-    if case_count == 26:
-        return list(VALUES_26)
-    raise ValueError(f"unsupported case_count={case_count!r}; supported: {SUPPORTED_CASE_COUNTS}")
-
-
-def schedule_for(case_count: int) -> list[int]:
-    if case_count == 16:
-        return list(SCHEDULE_16)
-    if case_count == 22:
-        return list(SCHEDULE_22)
-    if case_count == 26:
-        return list(SCHEDULE_26)
-    raise ValueError(f"unsupported case_count={case_count!r}; supported: {SUPPORTED_CASE_COUNTS}")
+CASE_COUNT: int = 26
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +89,6 @@ def schedule_for(case_count: int) -> list[int]:
 
 class DealPhase(Enum):
     LOBBY = "lobby"
-    PICK_CASES = "pick_cases"
     PICK_PERSONAL = "pick_personal"
     OPENING = "opening"
     BANKER = "banker"
@@ -134,6 +98,12 @@ class DealPhase(Enum):
 class JoinResult(Enum):
     JOINED = "joined"
     ALREADY_IN = "already_in"
+    NOT_IN_LOBBY = "not_in_lobby"
+
+
+class DeclineResult(Enum):
+    DECLINED = "declined"
+    ALREADY_DECLINED = "already_declined"
     NOT_IN_LOBBY = "not_in_lobby"
 
 
@@ -212,6 +182,10 @@ class DealSession:
     current_round_opened_by: dict[int, int] = field(default_factory=dict)
     personal_case_id: int | None = None
     players: dict[int, PlayerState] = field(default_factory=dict)
+    # Те, кто публично нажал «🚫 Отказаться» в лобби. На партию не влияет —
+    # только украшает текст лобби «Отказались: …». Если потом нажать
+    # «Присоединиться», уйдёт из declined и попадёт в players.
+    declined: dict[int, str] = field(default_factory=dict)
     round_idx: int = 0
     round_schedule: list[int] = field(default_factory=list)
     cases_opened_this_round: int = 0
@@ -269,6 +243,8 @@ def create_session(chat_id: int, starter_id: int, starter_name: str) -> DealSess
 def join(session: DealSession, user_id: int, name: str) -> JoinResult:
     if session.phase is not DealPhase.LOBBY:
         return JoinResult.NOT_IN_LOBBY
+    # Передумал отказываться — снимаем «отказ», добавим в игроки ниже.
+    session.declined.pop(user_id, None)
     if user_id in session.players:
         # Обновим имя на свежее (может поменяться в Telegram).
         session.players[user_id].name = name
@@ -277,33 +253,42 @@ def join(session: DealSession, user_id: int, name: str) -> JoinResult:
     return JoinResult.JOINED
 
 
+def decline(session: DealSession, user_id: int, name: str) -> DeclineResult:
+    """Публичный отказ играть. На партию не влияет, только текст в лобби.
+
+    Если игрок уже был в players, выкидываем его оттуда — иначе лобби
+    одновременно покажет его и в «в лобби», и в «отказались». Стартер тоже
+    может отказаться; он остаётся стартером (может стартовать или отменить).
+    """
+    if session.phase is not DealPhase.LOBBY:
+        return DeclineResult.NOT_IN_LOBBY
+    session.players.pop(user_id, None)
+    if user_id in session.declined:
+        session.declined[user_id] = name  # обновим имя
+        return DeclineResult.ALREADY_DECLINED
+    session.declined[user_id] = name
+    return DeclineResult.DECLINED
+
+
 def start_after_lobby(session: DealSession) -> StartResult:
     if session.phase is not DealPhase.LOBBY:
         return StartResult.WRONG_PHASE
     if not session.players:
         return StartResult.NO_PLAYERS
-    session.phase = DealPhase.PICK_CASES
+    session.case_count = CASE_COUNT
+    session.values = list(VALUES)
+    session.round_schedule = list(SCHEDULE)
+    # Распределяем значения по кейсам 1..N случайным образом.
+    shuffled = list(VALUES)
+    random.shuffle(shuffled)
+    session.case_values = dict(enumerate(shuffled, start=1))
+    session.phase = DealPhase.PICK_PERSONAL
     return StartResult.OK
 
 
 # ---------------------------------------------------------------------------
-# Setup: размер игры и личный кейс
+# Setup: личный кейс
 # ---------------------------------------------------------------------------
-
-
-def set_case_count(session: DealSession, n: int) -> None:
-    if session.phase is not DealPhase.PICK_CASES:
-        raise WrongPhase(f"set_case_count requires PICK_CASES, got {session.phase}")
-    if n not in SUPPORTED_CASE_COUNTS:
-        raise ValueError(f"unsupported case_count={n!r}")
-    session.case_count = n
-    session.values = values_for(n)
-    session.round_schedule = schedule_for(n)
-    # Распределяем значения по кейсам 1..N случайным образом.
-    shuffled = list(session.values)
-    random.shuffle(shuffled)
-    session.case_values = dict(enumerate(shuffled, start=1))
-    session.phase = DealPhase.PICK_PERSONAL
 
 
 def set_personal_case(session: DealSession, case_id: int) -> None:
