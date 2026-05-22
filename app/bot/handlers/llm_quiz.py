@@ -69,7 +69,7 @@ _CUSTOM_TKEY = "x"
 _MAX_TOPIC_LEN = 80
 
 _DIFFICULTY_LABELS: dict[str, str] = {
-    "any": "🎲 Любая",
+    "any": "🎲 Смешанная",
     "easy": "😊 Лёгкая",
     "medium": "🤔 Средняя",
     "hard": "😱 Сложная",

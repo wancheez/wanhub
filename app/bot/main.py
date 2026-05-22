@@ -8,7 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from app.bot.auth import ChatWhitelistMiddleware
 from app.bot.handlers import register_handlers
 from app.core.config import TELEGRAM_ADMIN_ID, TELEGRAM_BOT_TOKEN
-from app.services import deal_db
+from app.services import deal_db, llm_history
 from app.services.deal_weekly import weekly_summary_loop
 
 log = logging.getLogger("app")
@@ -47,6 +47,7 @@ async def start_bot() -> None:
     dp.message.middleware(middleware)
     dp.callback_query.middleware(middleware)
     deal_db.init_db()
+    llm_history.init_db()
     register_handlers(dp)
     log.info("start_bot: handlers registered, admin_id=%s", TELEGRAM_ADMIN_ID)
 

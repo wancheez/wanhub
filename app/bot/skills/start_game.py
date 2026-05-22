@@ -31,11 +31,12 @@ from app.services import games
 log = logging.getLogger("app")
 
 # Названия игр + любые окончания/падежи: «квиз», «викторину», «флаги», «столицу»,
-# «фильм», «кино», «movie», «сделку».
+# «фильм», «кино», «movie», «сделку», «загадки», «загадку».
 _GAME_NOUN_RE = (
     r"(квиз\w*|викторин\w*|флаг(?:и|ов|ах|ам|у)?|флажк\w*|столиц\w*|"
     r"фильм\w*|кино|movie|сериал\w*|show|series|"
-    r"сделк\w*|деал\w*|deal)"
+    r"сделк\w*|деал\w*|deal|"
+    r"загадк\w*|riddles?)"
 )
 
 # Стартовые глаголы. «давай» допускает дополнительный глагол («давай сыграем»).
@@ -99,6 +100,8 @@ def _resolve_game(word: str) -> str | None:
         return "show"
     if w.startswith(("сделк", "деал", "deal")):
         return "deal"
+    if w.startswith(("загадк", "riddle")):
+        return "riddles"
     return None
 
 
@@ -224,6 +227,27 @@ class StartGameSkill:
             from app.bot.handlers.deal import start_deal_from_skill
 
             await start_deal_from_skill(message)
+            return
+
+        if game_name == "riddles":
+            # /riddles — wizard «число → сложность». Если число валидно и есть
+            # в NUM_CHOICES — пропускаем экран числа, сразу спрашиваем
+            # сложность. Иначе открываем стандартный wizard (cmd_riddles).
+            from app.bot.handlers.riddles import (
+                _difficulty_keyboard as _riddles_difficulty_keyboard,
+            )
+            from app.bot.handlers.riddles import cmd_riddles
+            from app.services.riddles import NUM_CHOICES as RIDDLE_NUM_CHOICES
+
+            num = params["num"]
+            if num and num in RIDDLE_NUM_CHOICES:
+                await message.answer(
+                    f"<b>🧩 Загадки</b>\n{num} загадок\nСложность?",
+                    parse_mode="HTML",
+                    reply_markup=_riddles_difficulty_keyboard(starter_id, num),
+                )
+            else:
+                await cmd_riddles(message)
             return
 
         # flags / capitals — единственный параметр (число) либо в тексте, либо дефолт.

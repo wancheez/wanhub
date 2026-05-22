@@ -13,6 +13,7 @@ LLM-генерация по теме (LLM_QUIZ), и угадайки по кад
 import logging
 import random
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,7 @@ from app.services import movies_db, shows_db
 from app.services.countries import Country, get_countries
 from app.services.llm_quiz import GeneratedQuestion, LLMQuizFailed, generate_quiz
 from app.services.movies_db import MoviesDBUnavailable  # re-exported для удобства хендлера
+from app.services.riddles import GeneratedRiddle, RiddlesFailed, generate_riddles
 from app.services.shows_db import ShowsDBUnavailable  # re-exported для удобства хендлера
 
 log = logging.getLogger("app")
@@ -37,21 +39,29 @@ __all__ = [
     "MoviesDBUnavailable",
     "NotEnoughItems",
     "Question",
+    "RiddleOutcome",
+    "RiddleSubmitResult",
+    "RiddlesFailed",
     "ShowsDBUnavailable",
     "SubmitResult",
     "advance",
     "answered_names",
     "cancel_game",
     "compute_scores",
+    "consume_hint",
+    "force_finish_riddle",
     "format_scoreboard",
     "get_game",
+    "normalize_text_answer",
     "reset_state",
     "start_capital_game",
     "start_flag_game",
     "start_llm_quiz_game",
     "start_movie_game",
+    "start_riddle_game",
     "start_show_game",
     "submit_answer",
+    "submit_text_answer",
 ]
 
 
@@ -61,6 +71,7 @@ class GameKind(Enum):
     LLM_QUIZ = "llm_quiz"
     MOVIE = "movie"
     SHOW = "show"
+    RIDDLE = "riddle"
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,13 @@ class Question:
     # обрезанный кадр фильма). Если задано — отправляется как
     # BufferedInputFile; image_url игнорируется.
     image_bytes: bytes | None = None
+    # Поля для свободно-текстовых вопросов (GameKind.RIDDLE). Для MC-игр
+    # остаются дефолтными и не используются. correct_text — каноничный
+    # ответ для отображения; acceptable_answers — уже нормализованные
+    # варианты для сверки (см. normalize_text_answer).
+    correct_text: str | None = None
+    acceptable_answers: tuple[str, ...] = ()
+    hint: str | None = None
 
 
 @dataclass
@@ -102,6 +120,13 @@ class Game:
     # (например: «🍿 Известные · топ-200» для /movie или «Сложность: 😱
     # Сложная» для /quiz). Wizard ставит её после успешного start_X_game.
     subtitle: str | None = None
+    # Только для GameKind.RIDDLE: message_id текущего сообщения с загадкой
+    # (для матчинга reply-ответов), остаток общих попыток в каждом раунде,
+    # и общий на игру баланс подсказок (1 для коротких партий, 2 для 10).
+    active_message_id: int | None = None
+    attempts_left: list[int] = field(default_factory=list)
+    hints_left: int = 0
+    hints_total: int = 0
 
     @property
     def total(self) -> int:
@@ -130,6 +155,23 @@ class AdvanceResult(Enum):
     FINISHED = "finished"
     STALE = "stale"
     NO_GAME = "no_game"
+
+
+class RiddleSubmitResult(Enum):
+    CORRECT = "correct"
+    WRONG_HAS_ATTEMPTS = "wrong_has_attempts"
+    EXHAUSTED = "exhausted"
+    ALREADY_SOLVED = "already_solved"
+    STALE_ROUND = "stale_round"
+    WRONG_GAME_KIND = "wrong_game_kind"
+    NO_GAME = "no_game"
+
+
+@dataclass(frozen=True)
+class RiddleOutcome:
+    result: RiddleSubmitResult
+    attempts_left: int = 0
+    canonical_answer: str | None = None
 
 
 class GameAlreadyRunning(Exception):
@@ -176,15 +218,78 @@ async def start_llm_quiz_game(
     """Игра «квиз, сгенерированный LLM по произвольной теме».
 
     Источник вопросов — Claude (см. `app/services/llm_quiz.py`). Сетевые
-    и парсинговые ошибки пробрасываются как `LLMQuizFailed`.
+    и парсинговые ошибки пробрасываются как `LLMQuizFailed`. Чтобы не
+    повторять прошлые партии в этом чате/теме — передаём модели
+    `AVOID_ANSWERS` из `llm_history` и пишем туда новые результаты.
     """
+    # Ленивый импорт ломает цикл games ↔ llm_history (последний берёт из
+    # games normalize_text_answer). К моменту первого вызова обе стороны
+    # уже инициализированы.
+    from app.services import llm_history
+
     if chat_id in _games:
         raise GameAlreadyRunning()
-    generated = await generate_quiz(topic, difficulty, num_questions)
+    avoid = llm_history.recent_quiz_answers(chat_id, topic)
+    generated = await generate_quiz(topic, difficulty, num_questions, avoid=avoid)
     if len(generated) < num_questions:
         raise NotEnoughItems()
+    llm_history.record_quiz_questions(chat_id, topic, generated)
     questions = _build_llm_quiz_questions(generated)
     return _register(chat_id, GameKind.LLM_QUIZ, starter_id, questions)
+
+
+RIDDLE_ATTEMPTS = 3
+
+
+def _hints_for_game(num_riddles: int) -> int:
+    """Сколько всего подсказок на партию: 1 для 3, 2 для 5, 3 для 10+."""
+    if num_riddles >= 10:
+        return 3
+    if num_riddles >= 5:
+        return 2
+    return 1
+
+
+async def start_riddle_game(
+    chat_id: int,
+    num_riddles: int,
+    starter_id: int,
+    *,
+    difficulty: str,
+) -> Game:
+    """Игра «загадки от LLM с ответами в свободной форме».
+
+    Сетевые и парсинговые ошибки пробрасываются как `RiddlesFailed`.
+    На каждый раунд даётся `RIDDLE_ATTEMPTS` общих попыток на чат.
+    Подсказки — общий на партию пул (`_hints_for_game`). История прошлых
+    ответов в этом чате уходит в `AVOID_ANSWERS` — см. `llm_history`.
+    """
+    from app.services import llm_history  # см. комментарий в start_llm_quiz_game
+
+    if chat_id in _games:
+        raise GameAlreadyRunning()
+    avoid = llm_history.recent_riddle_answers(chat_id)
+    generated = await generate_riddles(difficulty, num_riddles, avoid=avoid)
+    if len(generated) < num_riddles:
+        raise NotEnoughItems()
+    llm_history.record_riddles(chat_id, generated)
+    questions = _build_riddle_questions(generated)
+    game = _register(chat_id, GameKind.RIDDLE, starter_id, questions)
+    game.attempts_left = [RIDDLE_ATTEMPTS] * len(questions)
+    game.hints_total = _hints_for_game(num_riddles)
+    game.hints_left = game.hints_total
+    return game
+
+
+def consume_hint(chat_id: int) -> bool:
+    """Списать одну подсказку. True — получилось, False — пул исчерпан/нет игры."""
+    game = _games.get(chat_id)
+    if game is None or game.kind is not GameKind.RIDDLE:
+        return False
+    if game.hints_left <= 0:
+        return False
+    game.hints_left -= 1
+    return True
 
 
 # Пул фильмов: уровень популярности → сколько верхних позиций берём из
@@ -381,6 +486,76 @@ def cancel_game(chat_id: int) -> bool:
     return _games.pop(chat_id, None) is not None
 
 
+def submit_text_answer(
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    q_idx: int,
+    raw_text: str,
+) -> RiddleOutcome:
+    """Принять свободно-текстовый ответ на загадку.
+
+    Race-семантика: первый правильный ответ закрывает раунд (записывает
+    `answers[q_idx][user_id] = 0` == correct_idx — это даёт корректный
+    scoreboard через `compute_scores`). Общий счётчик `attempts_left[q_idx]`
+    уменьшается на каждый неверный ответ независимо от того, кто ответил.
+    """
+    game = _games.get(chat_id)
+    if game is None:
+        return RiddleOutcome(RiddleSubmitResult.NO_GAME)
+    if game.kind is not GameKind.RIDDLE:
+        return RiddleOutcome(RiddleSubmitResult.WRONG_GAME_KIND)
+    if q_idx != game.current_idx or game.is_finished:
+        return RiddleOutcome(RiddleSubmitResult.STALE_ROUND)
+    if game.answers[q_idx]:
+        return RiddleOutcome(RiddleSubmitResult.ALREADY_SOLVED)
+
+    q = game.questions[q_idx]
+    canonical = q.correct_text or ""
+    normalized = normalize_text_answer(raw_text)
+    if not normalized:
+        # Пустой текст после нормализации — не тратим попытку, молча STALE.
+        return RiddleOutcome(
+            RiddleSubmitResult.WRONG_HAS_ATTEMPTS,
+            attempts_left=game.attempts_left[q_idx],
+            canonical_answer=canonical,
+        )
+
+    if _matches_riddle_answer(normalized, q.acceptable_answers):
+        game.answers[q_idx][user_id] = q.correct_idx
+        game.players[user_id] = user_name
+        return RiddleOutcome(
+            RiddleSubmitResult.CORRECT,
+            attempts_left=game.attempts_left[q_idx],
+            canonical_answer=canonical,
+        )
+
+    # Неверный — уменьшаем общий счётчик попыток.
+    game.attempts_left[q_idx] = max(0, game.attempts_left[q_idx] - 1)
+    if game.attempts_left[q_idx] == 0:
+        return RiddleOutcome(
+            RiddleSubmitResult.EXHAUSTED,
+            attempts_left=0,
+            canonical_answer=canonical,
+        )
+    return RiddleOutcome(
+        RiddleSubmitResult.WRONG_HAS_ATTEMPTS,
+        attempts_left=game.attempts_left[q_idx],
+        canonical_answer=canonical,
+    )
+
+
+def force_finish_riddle(chat_id: int, q_idx: int) -> str | None:
+    """Принудительно закрыть раунд (sкип/сдаться). Вернуть каноничный ответ."""
+    game = _games.get(chat_id)
+    if game is None or game.kind is not GameKind.RIDDLE:
+        return None
+    if q_idx != game.current_idx or game.is_finished:
+        return None
+    game.attempts_left[q_idx] = 0
+    return game.questions[q_idx].correct_text
+
+
 def submit_answer(
     chat_id: int,
     user_id: int,
@@ -448,8 +623,16 @@ def format_scoreboard(game: Game) -> str:
 
     lines = [f"<b>🏁 Итог ({game.total} вопросов)</b>"]
     medals = ["🥇", "🥈", "🥉"]
-    for i, (name, score, answered) in enumerate(rows):
-        prefix = medals[i] if i < len(medals) else "  "
+    # Dense ranking: при равенстве очков игроки делят медаль, следующая
+    # уникальная сумма получает следующую медаль без пропусков.
+    # Пример: 10,10,8,5,5 → 🥇,🥇,🥈,🥉,🥉.
+    prev_score: int | None = None
+    rank = -1
+    for name, score, answered in rows:
+        if score != prev_score:
+            rank += 1
+            prev_score = score
+        prefix = medals[rank] if rank < len(medals) else "  "
         lines.append(f"{prefix} <b>{escape(name)}</b> — {score}/{answered}")
     return "\n".join(lines)
 
@@ -526,6 +709,94 @@ def _build_llm_quiz_questions(items: list[GeneratedQuestion]) -> list[Question]:
             )
         )
     return out
+
+
+def _build_riddle_questions(items: list[GeneratedRiddle]) -> list[Question]:
+    """Обернуть LLM-загадки в `Question`. options-заглушка не используется.
+
+    `acceptable_answers` сразу нормализуем — на горячем пути сравнения
+    больше не нужно дёргать unicodedata/strip для каждого варианта.
+    """
+    out: list[Question] = []
+    for item in items:
+        accepted = {normalize_text_answer(a) for a in (*item.acceptable_answers, item.answer)}
+        accepted.discard("")
+        out.append(
+            Question(
+                prompt=escape(item.riddle_text),
+                # options не используются, но dataclass требует кортеж из 4 строк.
+                options=("", "", "", ""),
+                correct_idx=0,
+                correct_text=item.answer,
+                acceptable_answers=tuple(sorted(accepted)),
+                hint=item.hint or None,
+            )
+        )
+    return out
+
+
+_RIDDLE_PUNCT_TRANS = str.maketrans(dict.fromkeys(".,!?;:\"'«»()[]{}—–-/\\…", " "))
+
+
+def normalize_text_answer(text: str) -> str:
+    """Привести ответ к каноничной форме: NFKC, lowercase, ё→е, без пунктуации."""
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text).strip().lower()
+    text = text.replace("ё", "е")
+    text = text.translate(_RIDDLE_PUNCT_TRANS)
+    # Схлопываем все whitespace в один пробел.
+    text = " ".join(text.split())
+    return text
+
+
+def _matches_riddle_answer(normalized: str, accepted: tuple[str, ...]) -> bool:
+    """Сверка с учётом опечаток (Levenshtein) против длинных вариантов."""
+    if normalized in accepted:
+        return True
+    # Опечатки: ≤1 на 6 символов, ≤2 на длиннее. Только против вариантов
+    # длиной ≥4, чтобы «да»/«нет»/«ум» не сматчились со случайным шумом.
+    threshold = 2 if len(normalized) > 6 else 1
+    for variant in accepted:
+        if len(variant) < 4:
+            continue
+        if abs(len(variant) - len(normalized)) > threshold:
+            continue
+        if _levenshtein(normalized, variant, threshold) <= threshold:
+            return True
+    return False
+
+
+def _levenshtein(a: str, b: str, max_dist: int) -> int:
+    """Минимальное Левенштейн-расстояние с ранним выходом по `max_dist`.
+
+    Возвращает либо точное расстояние ≤ max_dist, либо max_dist+1 (флаг
+    «больше порога»). Для коротких строк (≤ 40 символов) копеечно.
+    """
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > max_dist:
+        return max_dist + 1
+    if len(a) < len(b):
+        a, b = b, a
+    # b — короче; используем массив длины len(b)+1.
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(
+                prev[j] + 1,         # delete
+                cur[j - 1] + 1,      # insert
+                prev[j - 1] + cost,  # substitute
+            )
+            if cur[j] < row_min:
+                row_min = cur[j]
+        if row_min > max_dist:
+            return max_dist + 1
+        prev = cur
+    return prev[-1]
 
 
 def reset_state() -> None:

@@ -10,6 +10,7 @@ CATEGORY — one of: General Knowledge, History, Geography, Science & Nature, Te
 DIFFICULTY per question — one of: easy, medium, hard. When the request says `any`, mix ~40% easy / 40% medium / 20% hard.
 
 RULES:
+- If the user message contains an `AVOID_ANSWERS:` block — categorically do not use those correct answers or their obvious synonyms/cognates. Pick fundamentally different facts/objects within the topic, even if they are less obvious. Distractors may still mention them, but the correct answer must not.
 - Russian language for question_text, options, explanation. No anglicisms except proper nouns and common acronyms (NASA, IBM, USB).
 - 4 options, similar length and syntactic structure. correct_option_index ∈ 0..3, distribute organically across questions (don't favor 0).
 - One verifiable correct answer. Distractors plausible and same semantic category.

@@ -316,6 +316,50 @@ def test_game_match_deal_inflection():
     assert extract_game_intent("сделке") == {"game": "deal", "topic": None, "num": None}
 
 
+def test_game_match_bare_riddles():
+    assert extract_game_intent("загадки") == {"game": "riddles", "topic": None, "num": None}
+
+
+def test_game_match_bare_riddle_singular():
+    assert extract_game_intent("загадку") == {"game": "riddles", "topic": None, "num": None}
+
+
+def test_game_match_bare_riddles_en():
+    assert extract_game_intent("riddles") == {"game": "riddles", "topic": None, "num": None}
+
+
+def test_game_match_riddles_with_verb():
+    assert extract_game_intent("запусти загадки") == {"game": "riddles", "topic": None, "num": None}
+
+
+def test_game_match_riddles_with_play_phrase():
+    assert extract_game_intent("давай сыграем в загадки") == {
+        "game": "riddles",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_riddles_with_num():
+    assert extract_game_intent("загадки 10") == {"game": "riddles", "topic": None, "num": 10}
+
+
+def test_game_match_riddles_with_verb_and_num():
+    assert extract_game_intent("запусти загадки на 5") == {
+        "game": "riddles",
+        "topic": None,
+        "num": 5,
+    }
+
+
+def test_game_match_riddles_inflection():
+    assert extract_game_intent("поиграем в загадки") == {
+        "game": "riddles",
+        "topic": None,
+        "num": None,
+    }
+
+
 # ----- Topic capture for /quiz -----
 
 

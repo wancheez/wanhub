@@ -56,6 +56,18 @@ def _get_client() -> AsyncAnthropic:
     return _anthropic_client_llm_quiz
 
 
+def _format_avoid_block(avoid: list[str] | tuple[str, ...]) -> str:
+    """Собрать AVOID_ANSWERS-секцию для user-сообщения или пустую строку."""
+    if not avoid:
+        return ""
+    lines = "\n".join(f"- {item}" for item in avoid)
+    return (
+        "AVOID_ANSWERS (do not reuse these correct answers or their close "
+        "synonyms — pick fundamentally different facts/objects):\n"
+        f"{lines}\n"
+    )
+
+
 def _strip_markdown_fence(text: str) -> str:
     """Снять обрамление ```json ... ``` если Claude всё-таки его прислал.
 
@@ -77,10 +89,14 @@ async def generate_quiz(
     topic: str,
     difficulty: str,
     num_questions: int,
+    *,
+    avoid: list[str] | tuple[str, ...] = (),
 ) -> list[GeneratedQuestion]:
     """Сгенерировать квиз из `num_questions` вопросов по теме `topic`.
 
     `difficulty` ∈ {"any","easy","medium","hard"}, `num_questions` ∈ {5,10,20}.
+    `avoid` — последние правильные ответы по этой же теме в чате; модель
+    должна избегать их и близких синонимов. Пустой список = первый запуск.
     На любой проблеме (API/парсинг/схема) — `LLMQuizFailed`.
     """
     if difficulty not in DIFFICULTIES:
@@ -95,6 +111,7 @@ async def generate_quiz(
         f"TOPIC: {topic}\n"
         f"DIFFICULTY: {difficulty}\n"
         f"NUM_QUESTIONS: {num_questions}\n"
+        f"{_format_avoid_block(avoid)}"
         "Generate the quiz now."
     )
 
