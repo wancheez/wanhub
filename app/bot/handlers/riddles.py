@@ -5,6 +5,7 @@
 попытки на чат на каждую загадку, балл за загадку — первому отгадавшему.
 """
 
+import asyncio
 import logging
 from contextlib import suppress
 from html import escape
@@ -48,6 +49,13 @@ _DIFFICULTY_LABELS: dict[str, str] = {
     "hard": "😱 Сложная",
 }
 
+# Тайм-аут раунда: если за это время никто не отгадал, считаем что чат
+# сдался и переходим к следующей загадке. Таймер запускается в
+# `_send_riddle` и снимается на любом завершении раунда/игры.
+RIDDLE_TIMEOUT_SEC = 5 * 60
+
+_timeout_tasks: dict[int, asyncio.Task[None]] = {}
+
 
 # ----------------------------- public entry -----------------------------
 
@@ -76,6 +84,7 @@ async def cmd_cancel(message: Message) -> None:
     if message.from_user is not None and message.from_user.id != game.starter_id:
         await message.answer("Отменить может только тот, кто запустил игру.")
         return
+    _cancel_timeout(chat_id)
     games.cancel_game(chat_id)
     await message.answer("Игра отменена.")
 
@@ -168,6 +177,53 @@ async def _send_riddle(message: Message, game: games.Game) -> None:
         reply_markup=kb,
     )
     game.active_message_id = sent.message_id
+    _start_timeout(message, message.chat.id, game.current_idx)
+
+
+def _cancel_timeout(chat_id: int) -> None:
+    """Снять висящий таймер тайм-аута, если есть."""
+    task = _timeout_tasks.pop(chat_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _start_timeout(message: Message, chat_id: int, q_idx: int) -> None:
+    """Запустить таймер: через `RIDDLE_TIMEOUT_SEC` — авто-сдача раунда q_idx.
+
+    Защищён от устаревания: к моменту срабатывания проверяем, что игра жива,
+    раунд тот же и ещё не закрыт (никто не отгадал и попытки не кончились).
+    Любая дальнейшая транзишн `_send_riddle` перезапустит таймер.
+    """
+    _cancel_timeout(chat_id)
+
+    async def _runner() -> None:
+        try:
+            await asyncio.sleep(RIDDLE_TIMEOUT_SEC)
+        except asyncio.CancelledError:
+            return
+        game = games.get_game(chat_id)
+        if game is None or game.kind is not games.GameKind.RIDDLE:
+            return
+        if q_idx != game.current_idx or game.is_finished:
+            return
+        if game.answers[q_idx]:
+            # Кто-то уже отгадал — раунд закроется штатным флоу.
+            return
+        try:
+            answer = games.force_finish_riddle(chat_id, q_idx) or ""
+            await _finalize_riddle(message, game, q_idx, solver_name=None)
+            await message.answer(
+                f"⏰ Время вышло. Ответ: <b>{escape(answer)}</b>",
+                parse_mode="HTML",
+            )
+            await _advance_or_finish(message, chat_id, q_idx)
+        except Exception:
+            log.exception("riddles: timeout handler failed in chat %d", chat_id)
+        finally:
+            if _timeout_tasks.get(chat_id) is asyncio.current_task():
+                _timeout_tasks.pop(chat_id, None)
+
+    _timeout_tasks[chat_id] = asyncio.create_task(_runner())
 
 
 async def _finalize_riddle(
@@ -231,6 +287,7 @@ async def _advance_or_finish(message: Message, chat_id: int, q_idx: int) -> None
         game = games.get_game(chat_id)
         if game is not None:
             text = games.format_scoreboard(game)
+            _cancel_timeout(chat_id)
             games.cancel_game(chat_id)
             await message.answer(text, parse_mode="HTML")
         return
@@ -244,6 +301,7 @@ async def _advance_or_finish(message: Message, chat_id: int, q_idx: int) -> None
             log.exception("riddles: failed to send next riddle in chat %d", chat_id)
             with _suppress():
                 await message.answer("⚠️ Не получилось показать следующую загадку. Игра остановлена.")
+            _cancel_timeout(chat_id)
             games.cancel_game(chat_id)
 
 
@@ -445,6 +503,7 @@ async def on_stop(cb: CallbackQuery) -> None:
         await cb.answer("Только тот, кто запустил игру.", show_alert=False)
         return
     text = "<b>⏹ Игра остановлена.</b>\n\n" + games.format_scoreboard(game)
+    _cancel_timeout(chat_id)
     games.cancel_game(chat_id)
     await cb.message.answer(text, parse_mode="HTML")
     await cb.answer()
