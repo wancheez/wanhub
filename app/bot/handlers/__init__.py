@@ -2,6 +2,7 @@ from aiogram import Dispatcher
 
 from app.bot.handlers import (
     admin,
+    alias,
     chat,
     deal,
     device,
@@ -25,6 +26,7 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(games.router)
     dp.include_router(llm_quiz.router)  # /quiz + ll:* callbacks + FSM ввод темы
     dp.include_router(riddles.router)  # /riddles + rd:* callbacks + reply-ответы
+    dp.include_router(alias.router)  # /alias + al:* callbacks + reply-ответы
     dp.include_router(movie.router)  # /movie + mv:* wizard callbacks
     dp.include_router(show.router)  # /show + sh:* wizard callbacks
     dp.include_router(deal.router)  # /deal + dl:* callbacks

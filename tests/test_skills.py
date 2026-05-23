@@ -360,6 +360,49 @@ def test_game_match_riddles_inflection():
     }
 
 
+# ----- /alias -----
+
+
+def test_game_match_bare_alias():
+    assert extract_game_intent("алиас") == {"game": "alias", "topic": None, "num": None}
+
+
+def test_game_match_bare_alias_en():
+    assert extract_game_intent("alias") == {"game": "alias", "topic": None, "num": None}
+
+
+def test_game_match_alias_with_verb():
+    assert extract_game_intent("запусти алиас") == {"game": "alias", "topic": None, "num": None}
+
+
+def test_game_match_alias_with_play_phrase():
+    assert extract_game_intent("давай сыграем в алиас") == {
+        "game": "alias",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_alias_with_num():
+    assert extract_game_intent("алиас 5") == {"game": "alias", "topic": None, "num": 5}
+
+
+def test_game_match_alias_with_verb_and_num():
+    assert extract_game_intent("запусти алиас на 10") == {
+        "game": "alias",
+        "topic": None,
+        "num": 10,
+    }
+
+
+def test_game_match_alias_inflection():
+    assert extract_game_intent("поиграем в алиас") == {
+        "game": "alias",
+        "topic": None,
+        "num": None,
+    }
+
+
 # ----- Topic capture for /quiz -----
 
 

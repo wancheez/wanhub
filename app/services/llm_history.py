@@ -15,6 +15,7 @@ import time
 from contextlib import suppress
 
 from app.core.config import LLM_HISTORY_DB_PATH
+from app.services.alias import GeneratedAlias
 from app.services.games import normalize_text_answer
 from app.services.llm_quiz import GeneratedQuestion
 from app.services.riddles import GeneratedRiddle
@@ -25,8 +26,10 @@ __all__ = [
     "LLMHistoryDBUnavailable",
     "init_db",
     "is_available",
+    "recent_alias_answers",
     "recent_quiz_answers",
     "recent_riddle_answers",
+    "record_alias",
     "record_quiz_questions",
     "record_riddles",
     "reset_cache",
@@ -68,6 +71,16 @@ CREATE TABLE IF NOT EXISTS quiz_history (
 );
 CREATE INDEX IF NOT EXISTS idx_quiz_history_chat_topic_ts
     ON quiz_history(chat_id, topic_norm, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS alias_history (
+    chat_id     INTEGER NOT NULL,
+    created_at  REAL    NOT NULL,
+    answer_norm TEXT    NOT NULL,
+    answer      TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, answer_norm)
+);
+CREATE INDEX IF NOT EXISTS idx_alias_history_chat_ts
+    ON alias_history(chat_id, created_at DESC);
 """
 
 
@@ -198,9 +211,7 @@ def recent_quiz_answers(chat_id: int, topic: str, limit: int = 60) -> list[str]:
         return []
 
 
-def record_quiz_questions(
-    chat_id: int, topic: str, questions: list[GeneratedQuestion]
-) -> None:
+def record_quiz_questions(chat_id: int, topic: str, questions: list[GeneratedQuestion]) -> None:
     """UPSERT по (chat_id, topic_norm, answer_norm). Сохраняем только
     правильный ответ — для AVOID-блока этого достаточно.
     """
@@ -239,6 +250,75 @@ def record_quiz_questions(
             _prune_quiz_history(conn, chat_id, topic_n)
     except (sqlite3.Error, LLMHistoryDBUnavailable, OSError) as e:
         _mark_unavailable("record_quiz_questions", e)
+
+
+def recent_alias_answers(chat_id: int, limit: int = 30) -> list[str]:
+    """Последние загаданные слова алиаса в чате (DESC по времени)."""
+    if _unavailable:
+        return []
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            SELECT answer FROM alias_history
+            WHERE chat_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (chat_id, int(limit)),
+        )
+        return [row["answer"] for row in cur.fetchall()]
+    except (sqlite3.Error, LLMHistoryDBUnavailable, OSError) as e:
+        _mark_unavailable("recent_alias_answers", e)
+        return []
+
+
+def record_alias(chat_id: int, items: list[GeneratedAlias]) -> None:
+    """UPSERT по (chat_id, answer_norm). Прунинг — на запись."""
+    if _unavailable or not items:
+        return
+    now = time.time()
+    rows = []
+    for it in items:
+        norm = normalize_text_answer(it.word)
+        if not norm:
+            continue
+        rows.append((chat_id, now, norm, it.word))
+    if not rows:
+        return
+    try:
+        conn = _get_connection()
+        with conn:
+            conn.executemany(
+                """
+                INSERT INTO alias_history (chat_id, created_at, answer_norm, answer)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, answer_norm) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    answer     = excluded.answer
+                """,
+                rows,
+            )
+            _prune_alias_history(conn, chat_id)
+    except (sqlite3.Error, LLMHistoryDBUnavailable, OSError) as e:
+        _mark_unavailable("record_alias", e)
+
+
+def _prune_alias_history(conn: sqlite3.Connection, chat_id: int) -> None:
+    """Оставить только _PRUNE_KEEP свежайших слов в чате."""
+    conn.execute(
+        """
+        DELETE FROM alias_history
+        WHERE chat_id = ?
+          AND rowid NOT IN (
+              SELECT rowid FROM alias_history
+              WHERE chat_id = ?
+              ORDER BY created_at DESC
+              LIMIT ?
+          )
+        """,
+        (chat_id, chat_id, _PRUNE_KEEP),
+    )
 
 
 def _prune_riddle_history(conn: sqlite3.Connection, chat_id: int) -> None:

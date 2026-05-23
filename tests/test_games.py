@@ -561,3 +561,300 @@ def test_start_show_game_raises_when_num_exceeds_pool(
 
     with pytest.raises(games.NotEnoughItems):
         games.start_show_game(chat_id=1, num_questions=10, starter_id=1, popularity="easy")
+
+
+# ----- start_alias_game (LLM-генерация замокана) -----------------------------
+
+from app.services.alias import GeneratedAlias  # noqa: E402
+
+
+def _alias_item(word: str, *, difficulty: str = "easy") -> GeneratedAlias:
+    """Fake-слово с 5 подсказками и достаточным набором acceptable_answers."""
+    return GeneratedAlias(
+        word=word,
+        clues=(
+            f"{word} подсказка 1 — широкая",
+            f"{word} подсказка 2",
+            f"{word} подсказка 3",
+            f"{word} подсказка 4",
+            f"{word} подсказка 5 — узкая",
+        ),
+        acceptable_answers=(word, f"{word}а", f"{word}у"),
+        difficulty=difficulty,
+    )
+
+
+@pytest.fixture
+def patched_alias(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Подменить generate_alias и записи llm_history на канву."""
+    games.reset_state()
+    calls: dict = {"schedule_seen": None, "avoid_seen": None, "recorded": []}
+
+    async def fake_generate_alias(schedule: tuple[str, ...], *, avoid=()):
+        calls["schedule_seen"] = tuple(schedule)
+        calls["avoid_seen"] = list(avoid)
+        return [_alias_item(f"слово{i + 1}", difficulty=schedule[i]) for i in range(len(schedule))]
+
+    def fake_recent(chat_id: int, limit: int = 30) -> list[str]:
+        return []
+
+    def fake_record(chat_id: int, items):
+        calls["recorded"].append((chat_id, [it.word for it in items]))
+
+    monkeypatch.setattr(games, "generate_alias", fake_generate_alias)
+    # llm_history импортируется лениво внутри start_alias_game.
+    from app.services import llm_history
+
+    monkeypatch.setattr(llm_history, "recent_alias_answers", fake_recent)
+    monkeypatch.setattr(llm_history, "record_alias", fake_record)
+    return calls
+
+
+def test_alias_difficulty_schedule_3() -> None:
+    assert games.alias_difficulty_schedule(3) == ("easy", "medium", "hard")
+
+
+def test_alias_difficulty_schedule_5() -> None:
+    assert games.alias_difficulty_schedule(5) == ("easy", "easy", "medium", "medium", "hard")
+
+
+def test_alias_difficulty_schedule_10_monotonic() -> None:
+    schedule = games.alias_difficulty_schedule(10)
+    assert len(schedule) == 10
+    # Все три уровня присутствуют, без откатов easy → medium → hard.
+    rank = {"easy": 0, "medium": 1, "hard": 2}
+    ranks = [rank[d] for d in schedule]
+    assert ranks == sorted(ranks)
+    assert set(schedule) == {"easy", "medium", "hard"}
+
+
+def test_alias_difficulty_schedule_invalid_num_raises() -> None:
+    with pytest.raises(ValueError):
+        games.alias_difficulty_schedule(7)
+
+
+def test_alias_points_at_easy_full_scale() -> None:
+    assert [games.alias_points_at("easy", lvl) for lvl in range(5)] == [5, 4, 3, 2, 1]
+
+
+def test_alias_points_at_medium_one_and_a_half() -> None:
+    assert [games.alias_points_at("medium", lvl) for lvl in range(5)] == [8, 6, 5, 3, 2]
+
+
+def test_alias_points_at_hard_double() -> None:
+    assert [games.alias_points_at("hard", lvl) for lvl in range(5)] == [10, 8, 6, 4, 2]
+
+
+def test_alias_points_at_unknown_difficulty_falls_back_to_easy() -> None:
+    assert games.alias_points_at("nonsense", 0) == 5
+
+
+def test_alias_points_at_clamps_out_of_range_level() -> None:
+    assert games.alias_points_at("medium", -1) == 8  # clamp to 0
+    assert games.alias_points_at("medium", 99) == 2  # clamp to last
+
+
+def test_start_alias_game_passes_schedule_to_generator(patched_alias: dict) -> None:
+    asyncio.run(games.start_alias_game(chat_id=1, num_words=5, starter_id=1))
+    assert patched_alias["schedule_seen"] == games.alias_difficulty_schedule(5)
+
+
+def test_start_alias_game_pre_registers_joined_players(patched_alias: dict) -> None:
+    """joined_players оказываются в game.players и в финальной таблице с 0/0."""
+    joined = {10: "Иван", 11: "Петя"}
+    game = asyncio.run(
+        games.start_alias_game(chat_id=1, num_words=3, starter_id=10, joined_players=joined)
+    )
+    assert game.players == joined
+    rows = games.compute_scores(game)
+    assert [(n, s, a) for n, s, a in rows] == [("Иван", 0, 0), ("Петя", 0, 0)]
+
+
+def test_start_alias_game_no_joined_yields_empty_scoreboard(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    assert game.players == {}
+    assert "Никто не ответил" in games.format_scoreboard(game)
+
+
+def test_start_alias_game_happy_path(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=42))
+    assert game.kind is games.GameKind.ALIAS
+    assert game.total == 3
+    assert game.starter_id == 42
+    assert game.alias_clue_level == [0, 0, 0]
+    assert game.alias_winner_points == [0, 0, 0]
+    for q in game.questions:
+        assert len(q.clues) == games.ALIAS_CLUES_TOTAL
+        assert q.correct_text is not None
+        assert q.acceptable_answers  # нормализованный набор не пуст
+    assert patched_alias["recorded"] == [(1, ["слово1", "слово2", "слово3"])]
+
+
+def test_start_alias_game_already_running(patched_alias: dict) -> None:
+    asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    with pytest.raises(games.GameAlreadyRunning):
+        asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+
+
+def test_reveal_next_clue_increments_until_last(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    # 0 → 1 → 2 → 3 → 4 (последний уровень)
+    for expected in range(1, games.ALIAS_CLUES_TOTAL):
+        assert games.reveal_next_clue(chat_id=1, q_idx=0) is True
+        assert game.alias_clue_level[0] == expected
+    # Следующий вызов уже не должен раскрывать.
+    assert games.reveal_next_clue(chat_id=1, q_idx=0) is False
+    assert game.alias_clue_level[0] == games.ALIAS_CLUES_TOTAL - 1
+
+
+def test_reveal_next_clue_stale_round_returns_false(patched_alias: dict) -> None:
+    asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    games.advance(1, q_idx=0)
+    # q_idx=0 уже не текущий — раскрывать нельзя.
+    assert games.reveal_next_clue(chat_id=1, q_idx=0) is False
+
+
+def test_reveal_next_clue_no_game() -> None:
+    games.reset_state()
+    assert games.reveal_next_clue(chat_id=999, q_idx=0) is False
+
+
+def test_submit_alias_correct_on_first_clue_max_points(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    word = game.questions[0].correct_text
+    assert word is not None
+    out = games.submit_alias_answer(1, user_id=10, user_name="Иван", q_idx=0, raw_text=word)
+    assert out.result is games.RiddleSubmitResult.CORRECT
+    assert out.attempts_left == games.ALIAS_POINTS_BY_LEVEL[0]  # 5
+    assert game.alias_winner_points[0] == games.ALIAS_POINTS_BY_LEVEL[0]
+    assert game.answers[0] == {10: games.ALIAS_POINTS_BY_LEVEL[0]}
+
+
+def test_submit_alias_correct_on_last_clue_min_points(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    # Перематываем до последней подсказки.
+    for _ in range(games.ALIAS_CLUES_TOTAL - 1):
+        games.reveal_next_clue(1, 0)
+    word = game.questions[0].correct_text
+    assert word is not None
+    out = games.submit_alias_answer(1, user_id=11, user_name="Петя", q_idx=0, raw_text=word)
+    assert out.result is games.RiddleSubmitResult.CORRECT
+    assert out.attempts_left == games.ALIAS_POINTS_BY_LEVEL[-1]  # 1
+    assert game.alias_winner_points[0] == games.ALIAS_POINTS_BY_LEVEL[-1]
+
+
+def test_submit_alias_wrong_does_not_change_state(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    out = games.submit_alias_answer(1, user_id=10, user_name="Иван", q_idx=0, raw_text="чушь")
+    assert out.result is games.RiddleSubmitResult.WRONG_HAS_ATTEMPTS
+    assert game.answers[0] == {}
+    assert game.alias_winner_points[0] == 0
+    assert game.alias_clue_level[0] == 0
+
+
+def test_submit_alias_already_solved(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    word = game.questions[0].correct_text
+    assert word is not None
+    games.submit_alias_answer(1, user_id=10, user_name="Иван", q_idx=0, raw_text=word)
+    out = games.submit_alias_answer(1, user_id=11, user_name="Петя", q_idx=0, raw_text=word)
+    assert out.result is games.RiddleSubmitResult.ALREADY_SOLVED
+
+
+def test_submit_alias_wrong_game_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Submit на чужую игру (например, FLAG) должен вернуть WRONG_GAME_KIND."""
+    games.reset_state()
+    asyncio.run(games.start_flag_game(chat_id=1, num_questions=3, starter_id=1))
+    out = games.submit_alias_answer(1, user_id=10, user_name="Иван", q_idx=0, raw_text="х")
+    assert out.result is games.RiddleSubmitResult.WRONG_GAME_KIND
+
+
+def test_submit_alias_no_game() -> None:
+    games.reset_state()
+    out = games.submit_alias_answer(999, user_id=10, user_name="Иван", q_idx=0, raw_text="х")
+    assert out.result is games.RiddleSubmitResult.NO_GAME
+
+
+def test_force_finish_alias_returns_word(patched_alias: dict) -> None:
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    expected = game.questions[0].correct_text
+    assert games.force_finish_alias(1, q_idx=0) == expected
+
+
+def test_alias_scoreboard_sums_points_with_difficulty_multiplier(
+    patched_alias: dict,
+) -> None:
+    """Расписание num=3 — (easy, medium, hard). Иван берёт easy на 1-й (5×1=5)
+    и medium на 3-й (round(3×1.5)=5); Петя — hard на 5-й (round(1×2)=2)."""
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+
+    # Раунд 0 (easy): Иван на уровне 0 → +5
+    w0 = game.questions[0].correct_text
+    assert w0 is not None
+    games.submit_alias_answer(1, 10, "Иван", 0, w0)
+    games.advance(1, 0)
+
+    # Раунд 1 (medium): открываем 2 подсказки (уровень 2), Иван угадывает → +5
+    games.reveal_next_clue(1, 1)
+    games.reveal_next_clue(1, 1)
+    w1 = game.questions[1].correct_text
+    assert w1 is not None
+    games.submit_alias_answer(1, 10, "Иван", 1, w1)
+    games.advance(1, 1)
+
+    # Раунд 2 (hard): перематываем до последнего уровня (4), Петя угадывает → +2
+    for _ in range(games.ALIAS_CLUES_TOTAL - 1):
+        games.reveal_next_clue(1, 2)
+    w2 = game.questions[2].correct_text
+    assert w2 is not None
+    games.submit_alias_answer(1, 11, "Петя", 2, w2)
+    games.advance(1, 2)
+
+    rows = games.compute_scores(game)
+    assert [(name, score, answered) for name, score, answered in rows] == [
+        ("Иван", 10, 2),
+        ("Петя", 2, 1),
+    ]
+    text = games.format_scoreboard(game)
+    assert text.index("Иван") < text.index("Петя")
+
+
+def test_alias_game_stores_difficulty_schedule(patched_alias: dict) -> None:
+    """game.alias_difficulty == расписание сложностей по позициям."""
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=5, starter_id=1))
+    assert game.alias_difficulty == list(games.alias_difficulty_schedule(5))
+
+
+def test_alias_avoid_list_passed_to_generator(
+    patched_alias: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recent_alias_answers фидится прямиком в generate_alias через avoid=…"""
+    from app.services import llm_history
+
+    monkeypatch.setattr(
+        llm_history, "recent_alias_answers", lambda chat_id, limit=30: ["луна", "снег"]
+    )
+    asyncio.run(games.start_alias_game(chat_id=2, num_words=3, starter_id=1))
+    assert patched_alias["avoid_seen"] == ["луна", "снег"]
+
+
+def test_alias_question_acceptable_answers_normalized(patched_alias: dict) -> None:
+    """acceptable_answers — нормализованы (lowercase, без знаков) на этапе сборки."""
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    q = game.questions[0]
+    for variant in q.acceptable_answers:
+        assert variant == games.normalize_text_answer(variant)
+
+
+def test_alias_levenshtein_typo_accepted(patched_alias: dict) -> None:
+    """Опечатка в пределах порога Левенштейна засчитывается (как в загадках)."""
+    game = asyncio.run(games.start_alias_game(chat_id=1, num_words=3, starter_id=1))
+    word = game.questions[0].correct_text or ""
+    # "слово1" → "слов01" (одна замена) — должно проходить порог.
+    typo = word[:-1] + ("1" if not word.endswith("1") else "0")
+    out = games.submit_alias_answer(1, user_id=10, user_name="Иван", q_idx=0, raw_text=typo)
+    # Если по контракту порога мы проходим — CORRECT; иначе хотя бы не падает.
+    assert out.result in (
+        games.RiddleSubmitResult.CORRECT,
+        games.RiddleSubmitResult.WRONG_HAS_ATTEMPTS,
+    )

@@ -21,6 +21,7 @@ from enum import Enum
 from html import escape
 
 from app.services import movies_db, shows_db
+from app.services.alias import AliasFailed, GeneratedAlias, generate_alias
 from app.services.countries import Country, get_countries
 from app.services.llm_quiz import GeneratedQuestion, LLMQuizFailed, generate_quiz
 from app.services.movies_db import MoviesDBUnavailable  # re-exported для удобства хендлера
@@ -31,6 +32,7 @@ log = logging.getLogger("app")
 
 __all__ = [
     "AdvanceResult",
+    "AliasFailed",
     "Country",
     "Game",
     "GameAlreadyRunning",
@@ -45,21 +47,27 @@ __all__ = [
     "ShowsDBUnavailable",
     "SubmitResult",
     "advance",
+    "alias_difficulty_schedule",
+    "alias_points_at",
     "answered_names",
     "cancel_game",
     "compute_scores",
     "consume_hint",
+    "force_finish_alias",
     "force_finish_riddle",
     "format_scoreboard",
     "get_game",
     "normalize_text_answer",
     "reset_state",
+    "reveal_next_clue",
+    "start_alias_game",
     "start_capital_game",
     "start_flag_game",
     "start_llm_quiz_game",
     "start_movie_game",
     "start_riddle_game",
     "start_show_game",
+    "submit_alias_answer",
     "submit_answer",
     "submit_text_answer",
 ]
@@ -72,6 +80,7 @@ class GameKind(Enum):
     MOVIE = "movie"
     SHOW = "show"
     RIDDLE = "riddle"
+    ALIAS = "alias"
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,9 @@ class Question:
     correct_text: str | None = None
     acceptable_answers: tuple[str, ...] = ()
     hint: str | None = None
+    # Только для GameKind.ALIAS: 5 подсказок от широкой к узкой. Хранятся
+    # уже HTML-эскейпленными, чтобы рендер мог вставлять как есть.
+    clues: tuple[str, ...] = ()
 
 
 @dataclass
@@ -127,6 +139,13 @@ class Game:
     attempts_left: list[int] = field(default_factory=list)
     hints_left: int = 0
     hints_total: int = 0
+    # Только для GameKind.ALIAS: для каждого слова — текущий уровень
+    # раскрытой подсказки (0..ALIAS_CLUES_TOTAL-1), сложность (для расчёта
+    # очков через `alias_points_at`) и сколько очков начислено за раунд
+    # (0 если никто не угадал).
+    alias_clue_level: list[int] = field(default_factory=list)
+    alias_difficulty: list[str] = field(default_factory=list)
+    alias_winner_points: list[int] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -290,6 +309,176 @@ def consume_hint(chat_id: int) -> bool:
         return False
     game.hints_left -= 1
     return True
+
+
+# ---- ALIAS (бот раскрывает подсказки, игроки угадывают слово) -----------------
+
+ALIAS_CLUES_TOTAL = 5
+# Базовые очки за угадывание на уровне 0..4 (0 — самая широкая подсказка,
+# ценнее всего). Эти числа умножаются на множитель сложности.
+ALIAS_POINTS_BY_LEVEL: tuple[int, ...] = (5, 4, 3, 2, 1)
+# Множитель за сложность слова. Идея — мотивация ждать ради сложных раундов:
+# угадать hard на 1-й подсказке = 10 оч., easy на 5-й = 1 оч.
+ALIAS_DIFFICULTY_MULTIPLIER: dict[str, float] = {"easy": 1.0, "medium": 1.5, "hard": 2.0}
+
+
+def alias_points_at(difficulty: str, level: int) -> int:
+    """Очки за угадывание на данном уровне подсказки и сложности слова.
+
+    Защита от пограничных входов: уровень клампится в `ALIAS_POINTS_BY_LEVEL`,
+    неизвестная сложность фолбэчится к множителю 1 (как easy).
+    """
+    safe_level = max(0, min(level, len(ALIAS_POINTS_BY_LEVEL) - 1))
+    base = ALIAS_POINTS_BY_LEVEL[safe_level]
+    multiplier = ALIAS_DIFFICULTY_MULTIPLIER.get(difficulty, 1.0)
+    return int(base * multiplier + 0.5)
+
+
+def alias_difficulty_schedule(num_words: int) -> tuple[str, ...]:
+    """Расписание сложностей по позициям: монотонно easy → medium → hard.
+
+    Идея — внутри одной партии сложность растёт, чтобы игроки разогрелись
+    лёгкими словами и закрыли партию челленджем. Пропорции близки к
+    «mix any» в других LLM-играх: ~40% easy / 40% medium / 20% hard,
+    с точечной подстройкой для маленьких партий.
+    """
+    if num_words == 3:
+        return ("easy", "medium", "hard")
+    if num_words == 5:
+        return ("easy", "easy", "medium", "medium", "hard")
+    if num_words == 10:
+        return (
+            "easy",
+            "easy",
+            "easy",
+            "easy",
+            "medium",
+            "medium",
+            "medium",
+            "hard",
+            "hard",
+            "hard",
+        )
+    raise ValueError(f"unsupported num_words: {num_words!r}")
+
+
+async def start_alias_game(
+    chat_id: int,
+    num_words: int,
+    starter_id: int,
+    *,
+    joined_players: dict[int, str] | None = None,
+) -> Game:
+    """Игра «алиас наоборот»: LLM раскрывает 5 подсказок от широкой к узкой.
+
+    Сложность монотонно растёт от easy к hard внутри партии — определяется
+    из `num_words` через `alias_difficulty_schedule`. Очки — по угасающей
+    шкале `ALIAS_POINTS_BY_LEVEL`. История прошлых слов уходит в
+    `AVOID_ANSWERS` (см. `llm_history`). `joined_players` — пред-регистрация
+    из лобби: эти игроки попадут в финальную таблицу даже с 0 очков; играть
+    можно и без джойна — `submit_alias_answer` всё равно добавит игрока
+    при первом правильном ответе.
+    """
+    from app.services import llm_history  # см. комментарий в start_llm_quiz_game
+
+    if chat_id in _games:
+        raise GameAlreadyRunning()
+    schedule = alias_difficulty_schedule(num_words)
+    avoid = llm_history.recent_alias_answers(chat_id)
+    generated = await generate_alias(schedule, avoid=avoid)
+    if len(generated) < num_words:
+        raise NotEnoughItems()
+    llm_history.record_alias(chat_id, generated)
+    questions = _build_alias_questions(generated)
+    game = _register(chat_id, GameKind.ALIAS, starter_id, questions)
+    game.alias_clue_level = [0] * len(questions)
+    game.alias_difficulty = list(schedule)
+    game.alias_winner_points = [0] * len(questions)
+    if joined_players:
+        game.players.update(joined_players)
+    return game
+
+
+def submit_alias_answer(
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    q_idx: int,
+    raw_text: str,
+) -> RiddleOutcome:
+    """Принять текстовый ответ на алиас.
+
+    Race-семантика: первый правильный закрывает раунд и получает очки по
+    текущему `alias_clue_level[q_idx]`. Неверные ответы НЕ штрафуются:
+    игра — гонка, спам ботом «не угадал» только мешает. Возвращаемый
+    `RiddleOutcome.attempts_left` для CORRECT — это присуждённые очки
+    (переиспользуем поле, чтобы хендлеру не нужен отдельный тип).
+    """
+    game = _games.get(chat_id)
+    if game is None:
+        return RiddleOutcome(RiddleSubmitResult.NO_GAME)
+    if game.kind is not GameKind.ALIAS:
+        return RiddleOutcome(RiddleSubmitResult.WRONG_GAME_KIND)
+    if q_idx != game.current_idx or game.is_finished:
+        return RiddleOutcome(RiddleSubmitResult.STALE_ROUND)
+    if game.answers[q_idx]:
+        return RiddleOutcome(RiddleSubmitResult.ALREADY_SOLVED)
+
+    q = game.questions[q_idx]
+    canonical = q.correct_text or ""
+    normalized = normalize_text_answer(raw_text)
+    if not normalized:
+        return RiddleOutcome(
+            RiddleSubmitResult.WRONG_HAS_ATTEMPTS,
+            canonical_answer=canonical,
+        )
+
+    if _matches_riddle_answer(normalized, q.acceptable_answers):
+        level = game.alias_clue_level[q_idx]
+        difficulty = game.alias_difficulty[q_idx] if q_idx < len(game.alias_difficulty) else "easy"
+        points = alias_points_at(difficulty, level)
+        # В answers хранится {user_id: очки} — это используется в
+        # compute_scores для ALIAS-ветки.
+        game.answers[q_idx][user_id] = points
+        game.alias_winner_points[q_idx] = points
+        game.players[user_id] = user_name
+        return RiddleOutcome(
+            RiddleSubmitResult.CORRECT,
+            attempts_left=points,
+            canonical_answer=canonical,
+        )
+
+    return RiddleOutcome(
+        RiddleSubmitResult.WRONG_HAS_ATTEMPTS,
+        canonical_answer=canonical,
+    )
+
+
+def reveal_next_clue(chat_id: int, q_idx: int) -> bool:
+    """Открыть следующую подсказку. True — открыто, False — больше нет/нет игры.
+
+    Вызывается по таймеру из хендлера. Защищён от устаревшего раунда:
+    если игра закрылась/перешла дальше, ничего не делает.
+    """
+    game = _games.get(chat_id)
+    if game is None or game.kind is not GameKind.ALIAS:
+        return False
+    if q_idx != game.current_idx or game.is_finished:
+        return False
+    if game.alias_clue_level[q_idx] >= ALIAS_CLUES_TOTAL - 1:
+        return False
+    game.alias_clue_level[q_idx] += 1
+    return True
+
+
+def force_finish_alias(chat_id: int, q_idx: int) -> str | None:
+    """Принудительно закрыть раунд алиаса (skip/timeout). Вернуть слово."""
+    game = _games.get(chat_id)
+    if game is None or game.kind is not GameKind.ALIAS:
+        return None
+    if q_idx != game.current_idx or game.is_finished:
+        return None
+    return game.questions[q_idx].correct_text
 
 
 # Пул фильмов: уровень популярности → сколько верхних позиций берём из
@@ -599,19 +788,37 @@ def answered_names(game: Game, q_idx: int) -> list[str]:
 
 
 def compute_scores(game: Game) -> list[tuple[str, int, int]]:
-    """Вернуть список (имя, очки, ответил_всего) по каждому игроку."""
+    """Вернуть список (имя, очки, ответил_всего) по каждому игроку.
+
+    Для ALIAS значение в `answers[q_idx][user_id]` — это уже начисленные
+    очки по угасающей шкале (см. `submit_alias_answer`); сумма по игроку
+    и есть его счёт. Для остальных режимов значение — выбранный индекс
+    варианта, и очко даётся за совпадение с `correct_idx`.
+    """
     rows: list[tuple[str, int, int]] = []
-    for user_id, name in game.players.items():
-        score = 0
-        answered = 0
-        for q_idx, q in enumerate(game.questions):
-            choice = game.answers[q_idx].get(user_id)
-            if choice is None:
-                continue
-            answered += 1
-            if choice == q.correct_idx:
-                score += 1
-        rows.append((name, score, answered))
+    if game.kind is GameKind.ALIAS:
+        for user_id, name in game.players.items():
+            score = 0
+            answered = 0
+            for q_idx in range(len(game.questions)):
+                points = game.answers[q_idx].get(user_id)
+                if points is None:
+                    continue
+                answered += 1
+                score += points
+            rows.append((name, score, answered))
+    else:
+        for user_id, name in game.players.items():
+            score = 0
+            answered = 0
+            for q_idx, q in enumerate(game.questions):
+                choice = game.answers[q_idx].get(user_id)
+                if choice is None:
+                    continue
+                answered += 1
+                if choice == q.correct_idx:
+                    score += 1
+            rows.append((name, score, answered))
     rows.sort(key=lambda r: (-r[1], r[0].lower()))
     return rows
 
@@ -711,6 +918,31 @@ def _build_llm_quiz_questions(items: list[GeneratedQuestion]) -> list[Question]:
     return out
 
 
+def _build_alias_questions(items: list[GeneratedAlias]) -> list[Question]:
+    """Обернуть LLM-слова в `Question`. Подсказки уезжают в `clues`.
+
+    Слово хранится в `correct_text` (показывается при финализации раунда),
+    `acceptable_answers` нормализуется заранее — на горячем пути сравнения
+    не нужно дёргать unicodedata. `prompt`/`options` не используются:
+    рендером занимается handler через `q.clues`.
+    """
+    out: list[Question] = []
+    for item in items:
+        accepted = {normalize_text_answer(a) for a in (*item.acceptable_answers, item.word)}
+        accepted.discard("")
+        out.append(
+            Question(
+                prompt=escape(item.word),  # для финализации/логов
+                options=("", "", "", ""),
+                correct_idx=0,
+                correct_text=item.word,
+                acceptable_answers=tuple(sorted(accepted)),
+                clues=tuple(escape(c) for c in item.clues),
+            )
+        )
+    return out
+
+
 def _build_riddle_questions(items: list[GeneratedRiddle]) -> list[Question]:
     """Обернуть LLM-загадки в `Question`. options-заглушка не используется.
 
@@ -787,8 +1019,8 @@ def _levenshtein(a: str, b: str, max_dist: int) -> int:
         for j, cb in enumerate(b, 1):
             cost = 0 if ca == cb else 1
             cur[j] = min(
-                prev[j] + 1,         # delete
-                cur[j - 1] + 1,      # insert
+                prev[j] + 1,  # delete
+                cur[j - 1] + 1,  # insert
                 prev[j - 1] + cost,  # substitute
             )
             if cur[j] < row_min:

@@ -31,12 +31,13 @@ from app.services import games
 log = logging.getLogger("app")
 
 # Названия игр + любые окончания/падежи: «квиз», «викторину», «флаги», «столицу»,
-# «фильм», «кино», «movie», «сделку», «загадки», «загадку».
+# «фильм», «кино», «movie», «сделку», «загадки», «загадку», «алиас».
 _GAME_NOUN_RE = (
     r"(квиз\w*|викторин\w*|флаг(?:и|ов|ах|ам|у)?|флажк\w*|столиц\w*|"
     r"фильм\w*|кино|movie|сериал\w*|show|series|"
     r"сделк\w*|деал\w*|deal|"
-    r"загадк\w*|riddles?)"
+    r"загадк\w*|riddles?|"
+    r"алиас\w*|alias)"
 )
 
 # Стартовые глаголы. «давай» допускает дополнительный глагол («давай сыграем»).
@@ -102,6 +103,8 @@ def _resolve_game(word: str) -> str | None:
         return "deal"
     if w.startswith(("загадк", "riddle")):
         return "riddles"
+    if w.startswith(("алиас", "alias")):
+        return "alias"
     return None
 
 
@@ -248,6 +251,18 @@ class StartGameSkill:
                 )
             else:
                 await cmd_riddles(message)
+            return
+
+        if game_name == "alias":
+            # /alias — лобби с правилами и кнопкой «Присоединиться». Если
+            # пользователь указал число слов из NUM_CHOICES — открываем
+            # лобби сразу с ним; иначе дефолт (5).
+            from app.bot.handlers.alias import DEFAULT_NUM_WORDS, start_alias_from_skill
+            from app.services.alias import NUM_CHOICES as ALIAS_NUM_CHOICES
+
+            num = params["num"]
+            requested = num if num and num in ALIAS_NUM_CHOICES else DEFAULT_NUM_WORDS
+            await start_alias_from_skill(message, num_words=requested)
             return
 
         # flags / capitals — единственный параметр (число) либо в тексте, либо дефолт.
