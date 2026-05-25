@@ -21,7 +21,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.services import games
+from app.services import blackjack, deal, games
 from app.services.riddles import NUM_CHOICES, RiddlesFailed
 
 router = Router(name="riddles")
@@ -66,6 +66,12 @@ async def cmd_riddles(message: Message) -> None:
         return
     if games.get_game(message.chat.id) is not None:
         await message.answer("В этом чате уже идёт игра. /riddlescancel — чтобы прервать.")
+        return
+    if blackjack.get_session(message.chat.id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
+        return
+    if deal.get_session(message.chat.id) is not None:
+        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
         return
     await message.answer(
         "<b>🧩 Загадки</b>\nСколько загадок?",

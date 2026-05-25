@@ -24,7 +24,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.config import DEFAULT_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS
-from app.services import games
+from app.services import blackjack, deal, games
 
 router = Router(name="games")
 log = logging.getLogger("app")
@@ -68,6 +68,12 @@ async def _start_country_game(
     message: Message, command: CommandObject, kind: games.GameKind
 ) -> None:
     chat_id = message.chat.id
+    if blackjack.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
+        return
+    if deal.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
+        return
     cmd_name = _CMD_NAMES[kind]
     num = _parse_num_arg(command.args)
     if num is None:

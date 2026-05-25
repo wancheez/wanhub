@@ -22,7 +22,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.handlers.games import _send_question
 from app.core.config import MOVIE_MAX_QUESTIONS
-from app.services import games
+from app.services import blackjack, deal, games
 from app.services.movies_db import MoviesDBUnavailable
 
 router = Router(name="movie")
@@ -59,6 +59,12 @@ async def cmd_movie(message: Message) -> None:
     chat_id = message.chat.id
     if games.get_game(chat_id) is not None:
         await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
+        return
+    if blackjack.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
+        return
+    if deal.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
         return
     await message.answer(
         "<b>🎬 Угадай фильм по кадру</b>\nСколько вопросов?",

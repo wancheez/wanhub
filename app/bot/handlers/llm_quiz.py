@@ -26,7 +26,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.handlers.games import _send_question
-from app.services import games
+from app.services import blackjack, deal, games
 from app.services.llm_quiz import NUM_CHOICES, LLMQuizFailed
 
 router = Router(name="llm_quiz")
@@ -91,6 +91,12 @@ async def cmd_quiz(message: Message, state: FSMContext) -> None:
         return
     if games.get_game(message.chat.id) is not None:
         await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
+        return
+    if blackjack.get_session(message.chat.id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
+        return
+    if deal.get_session(message.chat.id) is not None:
+        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
         return
     # На всякий случай сбросим FSM — если до этого юзер был в waiting_topic
     # и просто запустил /quiz заново, не должен застрять в старом state.

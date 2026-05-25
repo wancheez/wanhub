@@ -30,7 +30,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.config import TELEGRAM_ADMIN_ID
-from app.services import deal, deal_db, deal_weekly, games
+from app.services import blackjack, deal, deal_db, deal_weekly, games
 
 router = Router(name="deal")
 log = logging.getLogger("app")
@@ -638,6 +638,9 @@ async def _start_deal(message: Message) -> None:
     chat_id = message.chat.id
     if games.get_game(chat_id) is not None:
         await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
+        return
+    if blackjack.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
         return
     existing = deal.get_session(chat_id)
     if existing is not None:

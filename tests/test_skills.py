@@ -403,6 +403,70 @@ def test_game_match_alias_inflection():
     }
 
 
+# ----- /blackjack -----
+
+
+def test_game_match_bare_blackjack_ru():
+    assert extract_game_intent("блэкджек") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_bare_blackjack_misspelled():
+    assert extract_game_intent("блекджек") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_bare_blackjack_en():
+    assert extract_game_intent("blackjack") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_bare_blackjack_short():
+    assert extract_game_intent("bj") == {"game": "blackjack", "topic": None, "num": None}
+
+
+def test_game_match_blackjack_with_verb():
+    assert extract_game_intent("запусти блэкджек") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_blackjack_with_play_phrase():
+    assert extract_game_intent("давай сыграем в блэкджек") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_blackjack_inflection():
+    assert extract_game_intent("поиграем в блэкджек") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
+def test_game_match_blackjack_dative_inflection():
+    # «блэкджеком», «блэкджеке» и т.п. — все валидны благодаря \w*.
+    assert extract_game_intent("давай в блэкджеке") == {
+        "game": "blackjack",
+        "topic": None,
+        "num": None,
+    }
+
+
 # ----- Topic capture for /quiz -----
 
 

@@ -3,6 +3,7 @@ from aiogram import Dispatcher
 from app.bot.handlers import (
     admin,
     alias,
+    blackjack,
     chat,
     deal,
     device,
@@ -30,4 +31,5 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(movie.router)  # /movie + mv:* wizard callbacks
     dp.include_router(show.router)  # /show + sh:* wizard callbacks
     dp.include_router(deal.router)  # /deal + dl:* callbacks
+    dp.include_router(blackjack.router)  # /blackjack + bj:* callbacks
     dp.include_router(chat.router)  # last — has the catch-all on plain text

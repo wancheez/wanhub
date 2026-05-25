@@ -79,6 +79,11 @@ SHOWS_DB_PATH: Path = PROJECT_ROOT / "data" / "shows.sqlite3"
 # первом старте бота (см. `app/services/deal_db.init_db`).
 DEAL_STATS_DB_PATH: Path = PROJECT_ROOT / "data" / "deal_stats.sqlite3"
 
+# Writable SQLite для блэкджека (/blackjack). Хранит исходы партий
+# (bj_outcomes) и плановые недельные сбросы (bj_resets). Баланс игрока
+# вычисляется как STARTING_BALANCE + SUM(payouts с последнего сброса).
+BLACKJACK_DB_PATH: Path = PROJECT_ROOT / "data" / "blackjack.sqlite3"
+
 # Writable SQLite c историей LLM-генераций (/quiz и /riddles) per-chat.
 # Используется как AVOID-список, чтобы при повторных партиях в одном чате
 # модель не возвращала те же ответы (см. `app/services/llm_history.py`).

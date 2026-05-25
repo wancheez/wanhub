@@ -37,7 +37,8 @@ _GAME_NOUN_RE = (
     r"фильм\w*|кино|movie|сериал\w*|show|series|"
     r"сделк\w*|деал\w*|deal|"
     r"загадк\w*|riddles?|"
-    r"алиас\w*|alias)"
+    r"алиас\w*|alias|"
+    r"блэкджек\w*|блекджек\w*|blackjack|bj)"
 )
 
 # Стартовые глаголы. «давай» допускает дополнительный глагол («давай сыграем»).
@@ -105,6 +106,8 @@ def _resolve_game(word: str) -> str | None:
         return "riddles"
     if w.startswith(("алиас", "alias")):
         return "alias"
+    if w.startswith(("блэкджек", "блекджек", "blackjack", "bj")):
+        return "blackjack"
     return None
 
 
@@ -230,6 +233,15 @@ class StartGameSkill:
             from app.bot.handlers.deal import start_deal_from_skill
 
             await start_deal_from_skill(message)
+            return
+
+        if game_name == "blackjack":
+            # У /blackjack ставка выбирается в фазе BETTING (пресеты от
+            # баланса); параметр `num` из текста игнорируем. Хендлер сам
+            # проверяет конфликты с другими играми и баланс стартера.
+            from app.bot.handlers.blackjack import start_blackjack_from_skill
+
+            await start_blackjack_from_skill(message)
             return
 
         if game_name == "riddles":

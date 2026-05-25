@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.services import games
+from app.services import blackjack, deal, games
 from app.services.alias import NUM_CHOICES, AliasFailed
 
 router = Router(name="alias")
@@ -134,6 +134,12 @@ async def start_alias_from_skill(message: Message, num_words: int = DEFAULT_NUM_
 
     if games.get_game(chat_id) is not None:
         await message.answer("В этом чате уже идёт игра. /aliascancel — чтобы прервать.")
+        return
+    if blackjack.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
+        return
+    if deal.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
         return
     if _get_lobby(chat_id) is not None:
         await message.answer("Лобби уже открыто. /aliascancel — чтобы закрыть.")
