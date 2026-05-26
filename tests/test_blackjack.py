@@ -70,20 +70,18 @@ def _hand_of(*ranks: str) -> list[Card]:
         (("10", "7"), 17, False),
         (("K", "Q"), 20, False),
         (("9", "2"), 11, False),
-        (("A", "6"), 17, True),                # soft 17
-        (("A", "10"), 21, True),               # натуральный — touch (soft до перебора)
-        (("A", "A"), 12, True),                # один туз 11, один туз 1
-        (("A", "5", "8"), 14, False),          # туз понижен до 1 (5+8+1=14)
-        (("A", "A", "9"), 21, True),           # 11+1+9
-        (("A", "A", "A"), 13, True),           # 11+1+1
-        (("10", "6", "5"), 21, False),         # обычный 21 без BJ
-        (("10", "6", "7"), 23, False),         # bust
-        (("A", "A", "8", "5"), 15, False),     # 1+1+8+5
+        (("A", "6"), 17, True),  # soft 17
+        (("A", "10"), 21, True),  # натуральный — touch (soft до перебора)
+        (("A", "A"), 12, True),  # один туз 11, один туз 1
+        (("A", "5", "8"), 14, False),  # туз понижен до 1 (5+8+1=14)
+        (("A", "A", "9"), 21, True),  # 11+1+9
+        (("A", "A", "A"), 13, True),  # 11+1+1
+        (("10", "6", "5"), 21, False),  # обычный 21 без BJ
+        (("10", "6", "7"), 23, False),  # bust
+        (("A", "A", "8", "5"), 15, False),  # 1+1+8+5
     ],
 )
-def test_hand_value(
-    ranks: tuple[str, ...], expected_total: int, expected_soft: bool
-) -> None:
+def test_hand_value(ranks: tuple[str, ...], expected_total: int, expected_soft: bool) -> None:
     total, is_soft = blackjack.hand_value(_hand_of(*ranks))
     assert total == expected_total
     assert is_soft is expected_soft
@@ -187,7 +185,9 @@ def test_start_with_no_players_fails() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _ready_to_bet(starter_id: int = 100, second_id: int | None = None) -> blackjack.BlackjackSession:
+def _ready_to_bet(
+    starter_id: int = 100, second_id: int | None = None
+) -> blackjack.BlackjackSession:
     s = blackjack.create_session(1, starter_id, "Алиса")
     if second_id is not None:
         blackjack.join(s, second_id, "Боб")
@@ -355,11 +355,11 @@ def test_deal_initial_assigns_two_cards_each(monkeypatch: pytest.MonkeyPatch) ->
     # Порядок раздачи: p1, p2, dealer-up, p1, p2, dealer-hole
     deck = [
         Card("10", "♠"),  # p1 card1
-        Card("9", "♠"),   # p2 card1
-        Card("7", "♠"),   # dealer up
-        Card("8", "♠"),   # p1 card2
-        Card("3", "♠"),   # p2 card2
-        Card("K", "♠"),   # dealer hole
+        Card("9", "♠"),  # p2 card1
+        Card("7", "♠"),  # dealer up
+        Card("8", "♠"),  # p1 card2
+        Card("3", "♠"),  # p2 card2
+        Card("K", "♠"),  # dealer hole
     ]
     _patch_deck(monkeypatch, s, deck)
     blackjack.deal_initial(s)
@@ -397,7 +397,7 @@ def test_dealer_blackjack_kills_non_bj_players(monkeypatch: pytest.MonkeyPatch) 
         Card("A", "♥"),  # dealer up
         Card("K", "♠"),  # p1.2 → BJ
         Card("3", "♠"),  # p2.2 → 12
-        Card("10", "♥"), # dealer hole → BJ
+        Card("10", "♥"),  # dealer hole → BJ
     ]
     _patch_deck(monkeypatch, s, deck)
     blackjack.deal_initial(s)
@@ -433,7 +433,7 @@ def _setup_simple_round(
 def test_hit_to_bust(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
         monkeypatch,
-        p1_initial=("10", "6"),     # 16
+        p1_initial=("10", "6"),  # 16
         dealer_initial=("9", "9"),  # 18
         extra_cards=[Card("K", "♠")],  # hit → 26 bust
     )
@@ -446,7 +446,9 @@ def test_hit_to_bust(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_stand_marks_done(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("10", "8"), dealer_initial=("9", "8"),
+        monkeypatch,
+        p1_initial=("10", "8"),
+        dealer_initial=("9", "8"),
     )
     res = blackjack.stand(s, 100)
     assert res is ActionResult.STAND_OK
@@ -458,8 +460,8 @@ def test_stand_marks_done(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_double_down_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
         monkeypatch,
-        p1_initial=("5", "6"),       # 11
-        dealer_initial=("9", "8"),   # 17
+        p1_initial=("5", "6"),  # 11
+        dealer_initial=("9", "8"),  # 17
         extra_cards=[Card("10", "♣")],  # double draw → 21
     )
     res = blackjack.double_down(s, 100, balance=1000)
@@ -502,7 +504,9 @@ def test_double_requires_two_cards(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_double_insufficient_balance(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("5", "6"), dealer_initial=("9", "8"),
+        monkeypatch,
+        p1_initial=("5", "6"),
+        dealer_initial=("9", "8"),
     )
     res = blackjack.double_down(s, 100, balance=50)  # < bet=100
     assert res is ActionResult.INSUFFICIENT_FUNDS_TO_DOUBLE
@@ -514,11 +518,11 @@ def test_hit_not_your_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     blackjack.place_bet(s, 200, 30, 1000)
     deck = [
         Card("10", "♠"),  # p1.1
-        Card("5", "♠"),   # p2.1
-        Card("7", "♠"),   # dealer up
-        Card("8", "♠"),   # p1.2
-        Card("9", "♠"),   # p2.2
-        Card("K", "♠"),   # dealer hole
+        Card("5", "♠"),  # p2.1
+        Card("7", "♠"),  # dealer up
+        Card("8", "♠"),  # p1.2
+        Card("9", "♠"),  # p2.2
+        Card("K", "♠"),  # dealer hole
     ]
     _patch_deck(monkeypatch, s, deck)
     blackjack.deal_initial(s)
@@ -533,7 +537,9 @@ def test_hit_not_your_turn(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_dealer_stands_on_soft_17(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("10", "7"), dealer_initial=("A", "6"),
+        monkeypatch,
+        p1_initial=("10", "7"),
+        dealer_initial=("A", "6"),
     )
     blackjack.stand(s, 100)
     blackjack.advance_turn(s)
@@ -563,7 +569,7 @@ def test_dealer_short_circuits_when_all_busted(monkeypatch: pytest.MonkeyPatch) 
     s = _setup_simple_round(
         monkeypatch,
         p1_initial=("10", "6"),
-        dealer_initial=("3", "4"),    # 7 — должен бы добирать
+        dealer_initial=("3", "4"),  # 7 — должен бы добирать
         extra_cards=[Card("K", "♣")],  # hit для p1 → bust
     )
     blackjack.hit(s, 100)
@@ -580,7 +586,9 @@ def test_dealer_short_circuits_when_all_busted(monkeypatch: pytest.MonkeyPatch) 
 
 def test_settle_simple_win(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("10", "10"), dealer_initial=("9", "8"),  # 20 vs 17
+        monkeypatch,
+        p1_initial=("10", "10"),
+        dealer_initial=("9", "8"),  # 20 vs 17
     )
     blackjack.stand(s, 100)
     blackjack.advance_turn(s)
@@ -594,7 +602,9 @@ def test_settle_simple_win(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_settle_simple_loss(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("10", "6"), dealer_initial=("9", "9"),  # 16 vs 18
+        monkeypatch,
+        p1_initial=("10", "6"),
+        dealer_initial=("9", "9"),  # 16 vs 18
     )
     blackjack.stand(s, 100)
     blackjack.advance_turn(s)
@@ -608,7 +618,9 @@ def test_settle_simple_loss(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_settle_push(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("10", "8"), dealer_initial=("9", "9"),  # 18 vs 18
+        monkeypatch,
+        p1_initial=("10", "8"),
+        dealer_initial=("9", "9"),  # 18 vs 18
     )
     blackjack.stand(s, 100)
     blackjack.advance_turn(s)
@@ -622,7 +634,9 @@ def test_settle_push(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_settle_natural_bj_pays_3_to_2(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
-        monkeypatch, p1_initial=("A", "K"), dealer_initial=("9", "8"),  # BJ vs 17
+        monkeypatch,
+        p1_initial=("A", "K"),
+        dealer_initial=("9", "8"),  # BJ vs 17
     )
     # Натуральный BJ выставлен сразу при deal_initial; ход не нужен.
     blackjack.advance_turn(s)
@@ -638,7 +652,10 @@ def test_settle_bj_payout_rounds_up(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _ready_to_bet()
     blackjack.place_bet(s, 100, 11, 1000)  # bet 11 → BJ +ceil(16.5)=17
     deck = [
-        Card("A", "♠"), Card("9", "♠"), Card("K", "♠"), Card("8", "♠"),
+        Card("A", "♠"),
+        Card("9", "♠"),
+        Card("K", "♠"),
+        Card("8", "♠"),
     ]
     _patch_deck(monkeypatch, s, deck)
     blackjack.deal_initial(s)
@@ -654,8 +671,8 @@ def test_settle_dealer_bust_player_wins(monkeypatch: pytest.MonkeyPatch) -> None
     s = _setup_simple_round(
         monkeypatch,
         p1_initial=("10", "8"),
-        dealer_initial=("10", "6"),     # 16 — добирает
-        extra_cards=[Card("Q", "♣")],   # 16 + 10 = 26 bust
+        dealer_initial=("10", "6"),  # 16 — добирает
+        extra_cards=[Card("Q", "♣")],  # 16 + 10 = 26 bust
     )
     blackjack.stand(s, 100)
     blackjack.advance_turn(s)
@@ -669,8 +686,8 @@ def test_settle_dealer_bust_player_wins(monkeypatch: pytest.MonkeyPatch) -> None
 def test_settle_doubled_win_doubles_payout(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _setup_simple_round(
         monkeypatch,
-        p1_initial=("5", "6"),       # 11
-        dealer_initial=("9", "8"),   # 17
+        p1_initial=("5", "6"),  # 11
+        dealer_initial=("9", "8"),  # 17
         extra_cards=[Card("10", "♣")],  # double → 21
     )
     blackjack.double_down(s, 100, balance=1000)
@@ -699,13 +716,13 @@ def test_full_happy_path_two_players(monkeypatch: pytest.MonkeyPatch) -> None:
     assert blackjack.all_bets_placed(s)
 
     deck = [
-        Card("10", "♠"),   # p1.1
-        Card("9", "♥"),    # p2.1
-        Card("6", "♦"),    # dealer up
-        Card("8", "♠"),    # p1.2 → 18
-        Card("9", "♥"),    # p2.2 → 18
-        Card("10", "♦"),   # dealer hole → 16, придётся добирать
-        Card("5", "♣"),    # dealer hit → 21
+        Card("10", "♠"),  # p1.1
+        Card("9", "♥"),  # p2.1
+        Card("6", "♦"),  # dealer up
+        Card("8", "♠"),  # p1.2 → 18
+        Card("9", "♥"),  # p2.2 → 18
+        Card("10", "♦"),  # dealer hole → 16, придётся добирать
+        Card("5", "♣"),  # dealer hit → 21
     ]
     _patch_deck(monkeypatch, s, deck)
     blackjack.deal_initial(s)
@@ -736,9 +753,7 @@ def test_full_happy_path_two_players(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _hand_with_outcome(
-    cards: list[Card], outcome: OutcomeKind, bet: int = 100
-) -> blackjack.Hand:
+def _hand_with_outcome(cards: list[Card], outcome: OutcomeKind, bet: int = 100) -> blackjack.Hand:
     return blackjack.Hand(cards=cards, bet=bet, outcome=outcome)
 
 

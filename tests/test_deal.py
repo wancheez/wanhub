@@ -606,12 +606,8 @@ def test_banker_offer_bias_high_left_drops_factor() -> None:
     # Активируем психологию: передаём rng=random (через autouse фикстуру шум = 1.0).
     import random as _r
 
-    high = deal.banker_offer(
-        remaining_high, round_idx=4, total_rounds=9, rng=_r
-    )
-    low = deal.banker_offer(
-        remaining_low, round_idx=4, total_rounds=9, rng=_r
-    )
+    high = deal.banker_offer(remaining_high, round_idx=4, total_rounds=9, rng=_r)
+    low = deal.banker_offer(remaining_low, round_idx=4, total_rounds=9, rng=_r)
     # При большом max(remaining) офер должен быть НЕ выше (биас вниз).
     # Avg почти одинаковый, поэтому сравнение валидное.
     assert high <= low
@@ -622,9 +618,7 @@ def test_banker_offer_bias_big_opened_raises_factor() -> None:
     import random as _r
 
     remaining = [100, 1_000, 10_000]
-    no_big = deal.banker_offer(
-        remaining, round_idx=4, total_rounds=9, rng=_r
-    )
+    no_big = deal.banker_offer(remaining, round_idx=4, total_rounds=9, rng=_r)
     with_big = deal.banker_offer(
         remaining,
         round_idx=4,

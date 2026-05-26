@@ -112,9 +112,7 @@ def test_riddle_limit_caps_result(fresh_db: Path) -> None:
     assert len(recent) == 3
 
 
-def test_riddle_prune_keeps_only_recent(
-    fresh_db: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_riddle_prune_keeps_only_recent(fresh_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """При превышении _PRUNE_KEEP старые записи удаляются."""
     monkeypatch.setattr(llm_history, "_PRUNE_KEEP", 5)
     # 8 уникальных ответов с разными временами → должно остаться 5 свежих.
@@ -166,9 +164,7 @@ def test_quiz_chats_are_isolated(fresh_db: Path) -> None:
     assert llm_history.recent_quiz_answers(2, "Python") == ["список"]
 
 
-def test_quiz_prune_keeps_only_recent(
-    fresh_db: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_quiz_prune_keeps_only_recent(fresh_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm_history, "_PRUNE_KEEP", 3)
     for i in range(6):
         llm_history.record_quiz_questions(1, "X", [_question(f"a{i}")])
@@ -181,9 +177,7 @@ def test_quiz_prune_keeps_only_recent(
 # ----- graceful degradation -----
 
 
-def test_graceful_when_db_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_graceful_when_db_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Если файл/директория недоступны — функции no-op'ят, не падают."""
     bad = tmp_path / "no" / "such" / "dir" / "file.sqlite3"
     monkeypatch.setattr(llm_history, "LLM_HISTORY_DB_PATH", bad)

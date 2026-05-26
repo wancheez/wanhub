@@ -57,8 +57,8 @@ class BlackjackDBUnavailable(Exception):
 @dataclass(frozen=True)
 class LeaderRow:
     user_name: str
-    net: int      # SUM(payout)
-    best: int     # MAX(payout)
+    net: int  # SUM(payout)
+    best: int  # MAX(payout)
     games: int
     balance: int  # текущий баланс (STARTING_BALANCE + net в окне)
 

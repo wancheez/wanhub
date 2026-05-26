@@ -161,9 +161,7 @@ def _round_text(game: games.Game) -> str:
     q = game.current_question()
     assert q is not None
     return (
-        f"{_round_header(game)}\n"
-        f"<blockquote>{q.prompt}</blockquote>\n"
-        f"<i>Ответь <b>реплаем</b>.</i>"
+        f"{_round_header(game)}\n<blockquote>{q.prompt}</blockquote>\n<i>Ответь <b>реплаем</b>.</i>"
     )
 
 
@@ -306,7 +304,9 @@ async def _advance_or_finish(message: Message, chat_id: int, q_idx: int) -> None
         except Exception:
             log.exception("riddles: failed to send next riddle in chat %d", chat_id)
             with _suppress():
-                await message.answer("⚠️ Не получилось показать следующую загадку. Игра остановлена.")
+                await message.answer(
+                    "⚠️ Не получилось показать следующую загадку. Игра остановлена."
+                )
             _cancel_timeout(chat_id)
             games.cancel_game(chat_id)
 
@@ -387,7 +387,9 @@ async def on_go(cb: CallbackQuery) -> None:
         game.subtitle = f"🧩 Загадки · {_DIFFICULTY_LABELS[diff]}"
     except games.GameAlreadyRunning:
         with _suppress_edit_noop():
-            await cb.message.edit_text("В этом чате уже идёт игра. /riddlescancel — чтобы прервать.")
+            await cb.message.edit_text(
+                "В этом чате уже идёт игра. /riddlescancel — чтобы прервать."
+            )
         return
     except games.NotEnoughItems:
         with _suppress_edit_noop():

@@ -172,7 +172,9 @@ def _validate_and_parse(parsed: Any, expected_count: int) -> list[GeneratedRiddl
         if not isinstance(acceptable, list) or not acceptable:
             raise RiddlesFailed(f"r[{i}].acceptable_answers must be non-empty list: {acceptable!r}")
         if not all(isinstance(a, str) and a.strip() for a in acceptable):
-            raise RiddlesFailed(f"r[{i}].acceptable_answers has non-string or empty: {acceptable!r}")
+            raise RiddlesFailed(
+                f"r[{i}].acceptable_answers has non-string or empty: {acceptable!r}"
+            )
         if not isinstance(hint, str):
             raise RiddlesFailed(f"r[{i}].hint not str: {hint!r}")
         if not isinstance(explanation, str):

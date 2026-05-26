@@ -277,15 +277,13 @@ async def banker_line(
             raise BankerVoiceFailed("empty response from claude")
         # Срежем по первой строке (на случай если модель вернёт несколько),
         # снимем возможные кавычки и hard-cap по длине.
-        line = text.splitlines()[0].strip().strip('"\'«»')
+        line = text.splitlines()[0].strip().strip("\"'«»")
         if not line:
             raise BankerVoiceFailed("first line empty")
         if len(line) > MAX_LINE_CHARS:
             line = line[:MAX_LINE_CHARS].rstrip() + "…"
         elapsed = time.monotonic() - t_start
-        log.info(
-            "deal_banker_voice: cat=%s offer=%d in %.2fs", category, offer, elapsed
-        )
+        log.info("deal_banker_voice: cat=%s offer=%d in %.2fs", category, offer, elapsed)
         return line
     except (APIError, TimeoutError, BankerVoiceFailed, ValueError) as e:
         log.info("deal_banker_voice: fallback (%s)", e.__class__.__name__)

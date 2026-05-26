@@ -31,6 +31,7 @@ class _RngLike(Protocol):
 
     def uniform(self, a: float, b: float) -> float: ...
 
+
 log = logging.getLogger("app")
 
 __all__ = [
@@ -484,9 +485,7 @@ def transition_to_banker(session: DealSession) -> int:
     if not is_round_complete(session):
         raise WrongPhase("round is not complete yet")
 
-    opened_values = [
-        session.case_values[c] for c in session.current_round_opened
-    ]
+    opened_values = [session.case_values[c] for c in session.current_round_opened]
     offer = banker_offer(
         remaining_values(session),
         session.round_idx,
@@ -590,9 +589,7 @@ def _enter_final_swap(session: DealSession) -> int:
         if c != session.personal_case_id and c not in session.opened
     ]
     if len(candidates) != 1:
-        raise WrongPhase(
-            f"expected exactly 1 case on the table for SWAP, got {len(candidates)}"
-        )
+        raise WrongPhase(f"expected exactly 1 case on the table for SWAP, got {len(candidates)}")
     session.final_table_case_id = candidates[0]
     session.swap_decisions = {}
     session.phase = DealPhase.FINAL_SWAP

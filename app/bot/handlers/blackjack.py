@@ -157,15 +157,9 @@ def _kb_betting(chat_id: int) -> InlineKeyboardMarkup:
             text=f"+{amount}",
             callback_data=f"{_CB_BET}{chat_id}:+{amount}",
         )
-    builder.button(
-        text="🎰 All-in", callback_data=f"{_CB_BET}{chat_id}:{_BET_OP_ALL}"
-    )
-    builder.button(
-        text="🗑 Сброс", callback_data=f"{_CB_BET}{chat_id}:{_BET_OP_CLEAR}"
-    )
-    builder.button(
-        text="✅ Поставить", callback_data=f"{_CB_BET}{chat_id}:{_BET_OP_OK}"
-    )
+    builder.button(text="🎰 All-in", callback_data=f"{_CB_BET}{chat_id}:{_BET_OP_ALL}")
+    builder.button(text="🗑 Сброс", callback_data=f"{_CB_BET}{chat_id}:{_BET_OP_CLEAR}")
+    builder.button(text="✅ Поставить", callback_data=f"{_CB_BET}{chat_id}:{_BET_OP_OK}")
     # 6 чип-кнопок (3+3) → служебные (3) → Отмена. Итого 4 ряда.
     builder.adjust(3, 3, 3)
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{_CB_CANCEL}{chat_id}"))
@@ -276,9 +270,7 @@ def _text_betting(session: blackjack.BlackjackSession) -> str:
         p = session.players[uid]
         balance = blackjack_db.get_balance(session.chat_id, uid)
         if balance <= 0:
-            lines.append(
-                f"🔒 <b>{escape(p.name)}</b> — банкрот, ждёт сброса (вс 21:00 МСК)"
-            )
+            lines.append(f"🔒 <b>{escape(p.name)}</b> — банкрот, ждёт сброса (вс 21:00 МСК)")
             continue
         if p.bet_amount > 0:
             lines.append(
@@ -322,9 +314,7 @@ def _text_player_turns(session: blackjack.BlackjackSession) -> str:
         bet_str = f"· ставка {_fmt_chips(p.hand.bet)}"
         if p.hand.doubled:
             bet_str += " (×2)"
-        lines.append(
-            f"{prefix}<b>{escape(p.name)}</b>: {_fmt_hand(p.hand)} {bet_str} {status}"
-        )
+        lines.append(f"{prefix}<b>{escape(p.name)}</b>: {_fmt_hand(p.hand)} {bet_str} {status}")
     lines.append("")
     if cp is not None:
         lines.append(f"Ход: <b>{escape(cp.name)}</b> — Hit / Stand / Double")
@@ -364,8 +354,7 @@ def _text_dealer(session: blackjack.BlackjackSession) -> str:
         if p.hand.doubled:
             bet_str += " (×2)"
         lines.append(
-            f"• <b>{escape(p.name)}</b>: {_fmt_hand(p.hand)} {bet_str} "
-            f"{_player_hand_status(p)}"
+            f"• <b>{escape(p.name)}</b>: {_fmt_hand(p.hand)} {bet_str} {_player_hand_status(p)}"
         )
     return "\n".join(lines)
 
@@ -385,19 +374,12 @@ def _text_dealer_hole_revealed(session: blackjack.BlackjackSession) -> str:
     return "\n".join(lines)
 
 
-def _text_dealer_after_draw(
-    session: blackjack.BlackjackSession, card: blackjack.Card
-) -> str:
+def _text_dealer_after_draw(session: blackjack.BlackjackSession, card: blackjack.Card) -> str:
     """Сообщение после каждой добранной карты."""
-    return (
-        f"<b>🃏 Дилер берёт {card}</b>\n"
-        f"Рука: {_fmt_hand(session.dealer_hand)}"
-    )
+    return f"<b>🃏 Дилер берёт {card}</b>\nРука: {_fmt_hand(session.dealer_hand)}"
 
 
-def _text_dealer_skipped(
-    session: blackjack.BlackjackSession, drawn: list[blackjack.Card]
-) -> str:
+def _text_dealer_skipped(session: blackjack.BlackjackSession, drawn: list[blackjack.Card]) -> str:
     """Свёрнутый «всё разом» — после клика «⏭ Пропустить»."""
     drawn_str = " ".join(str(c) for c in drawn)
     return (
@@ -424,9 +406,11 @@ def _text_finished_summary(session: blackjack.BlackjackSession) -> str:
     # Сортируем по payout убывающе — победителей сверху.
     by_payout = sorted(
         session.player_order,
-        key=lambda uid: -session.players[uid].hand.payout  # type: ignore[union-attr]
-        if session.players[uid].hand is not None
-        else 0,
+        key=lambda uid: (
+            -session.players[uid].hand.payout  # type: ignore[union-attr]
+            if session.players[uid].hand is not None
+            else 0
+        ),
     )
     for uid in by_payout:
         p = session.players[uid]
@@ -467,9 +451,7 @@ def _render_payload(
         balance = blackjack_db.get_balance(session.chat_id, cp.user_id)
         assert cp.hand is not None
         can_double = len(cp.hand.cards) == 2 and balance >= cp.hand.bet
-        return _text_player_turns(session), _kb_player_turn(
-            session.chat_id, can_double=can_double
-        )
+        return _text_player_turns(session), _kb_player_turn(session.chat_id, can_double=can_double)
     if phase is blackjack.BlackjackPhase.DEALER:
         return _text_dealer(session), None
     # FINISHED
@@ -518,9 +500,7 @@ async def _after_bet(message: Message, session: blackjack.BlackjackSession) -> N
     await _bump_phase(message, session)
 
 
-async def _after_player_action(
-    message: Message, session: blackjack.BlackjackSession
-) -> None:
+async def _after_player_action(message: Message, session: blackjack.BlackjackSession) -> None:
     """После Hit/Stand/Double: текущий игрок мог завершить ход → продвигаем."""
     cp = blackjack.current_player(session)
     if cp is not None and cp.hand is not None and cp.hand.done:
@@ -535,9 +515,7 @@ async def _after_player_action(
     await _render(message, session, edit=True)
 
 
-def _spawn_dealer_animation(
-    message: Message, session: blackjack.BlackjackSession
-) -> None:
+def _spawn_dealer_animation(message: Message, session: blackjack.BlackjackSession) -> None:
     """Запустить анимацию дилера в фоновой таске.
 
     Делаем именно фоновой, а не `await` — иначе callback из текущего хендлера
@@ -559,9 +537,7 @@ def _cancel_dealer_task(chat_id: int) -> None:
     _dealer_skip_events.pop(chat_id, None)
 
 
-async def _animate_dealer_and_finish(
-    message: Message, session: blackjack.BlackjackSession
-) -> None:
+async def _animate_dealer_and_finish(message: Message, session: blackjack.BlackjackSession) -> None:
     """Поэтапная анимация хода дилера + сеттл + финальный summary.
 
     Поток:
@@ -718,9 +694,7 @@ async def start_blackjack_from_skill(message: Message) -> None:
     await _render(message, session, edit=False)
 
 
-async def _resurface_existing(
-    message: Message, session: blackjack.BlackjackSession
-) -> None:
+async def _resurface_existing(message: Message, session: blackjack.BlackjackSession) -> None:
     prev_msg_id = session.current_message_id
     if prev_msg_id is not None and message.bot is not None:
         try:
@@ -800,7 +774,7 @@ async def cmd_blackjacktop(message: Message) -> None:
 
 
 def _parse_int_tail(cb_data: str, prefix: str) -> int | None:
-    tail = cb_data[len(prefix):]
+    tail = cb_data[len(prefix) :]
     try:
         return int(tail)
     except ValueError:
@@ -808,7 +782,7 @@ def _parse_int_tail(cb_data: str, prefix: str) -> int | None:
 
 
 def _parse_bet_cb(cb_data: str) -> tuple[int, str] | None:
-    parts = cb_data[len(_CB_BET):].split(":")
+    parts = cb_data[len(_CB_BET) :].split(":")
     if len(parts) != 2:
         return None
     try:
@@ -983,9 +957,7 @@ async def _handle_bet_add(
     delta: int,
 ) -> None:
     assert cb.from_user is not None and isinstance(cb.message, Message)
-    res, new_amount = blackjack.add_to_running_bet(
-        session, cb.from_user.id, delta, balance
-    )
+    res, new_amount = blackjack.add_to_running_bet(session, cb.from_user.id, delta, balance)
     if res is blackjack.BetUpdateResult.INSUFFICIENT_FUNDS:
         await cb.answer(
             f"Не хватает фишек: стек {_fmt_chips(new_amount)} + {_fmt_chips(delta)} "

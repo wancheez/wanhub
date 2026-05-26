@@ -484,8 +484,7 @@ def _text_banker(session: deal.DealSession) -> str:
         # Telegram отдельным блоком с вертикальной чертой слева — реплика
         # визуально выделена и не сливается с цифрами офера.
         lines.append(
-            f"<blockquote>🎩 <b>Банкир:</b> <i>{escape(session.last_banker_line)}</i>"
-            "</blockquote>"
+            f"<blockquote>🎩 <b>Банкир:</b> <i>{escape(session.last_banker_line)}</i></blockquote>"
         )
     # Что открыли в этом раунде — суммы, на которые банкир и среагировал.
     if session.current_round_opened:
@@ -560,14 +559,10 @@ def _text_finished_board(session: deal.DealSession) -> str:
     lines: list[str] = ["<b>💼 Сделка или нет — финал</b>"]
     if session.swap_decisions:
         keep_names = [
-            _player_name(session, uid)
-            for uid, c in session.swap_decisions.items()
-            if c == "keep"
+            _player_name(session, uid) for uid, c in session.swap_decisions.items() if c == "keep"
         ]
         swap_names = [
-            _player_name(session, uid)
-            for uid, c in session.swap_decisions.items()
-            if c == "swap"
+            _player_name(session, uid) for uid, c in session.swap_decisions.items() if c == "swap"
         ]
         if keep_names:
             lines.append("🎒 Оставили: " + ", ".join(escape(n) for n in keep_names))
@@ -737,7 +732,8 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
         just_dealt = [
             (session.players[uid].name, offer_just)
             for uid, choice in session.round_decisions.items()
-            if choice == "deal" and session.players.get(uid) is not None
+            if choice == "deal"
+            and session.players.get(uid) is not None
             and session.players[uid].status == "active"
         ]
         finalize_res = deal.finalize_banker(session)
@@ -760,9 +756,7 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
     return False
 
 
-async def _announce_dropouts(
-    message: Message, just_dealt: list[tuple[str, int]]
-) -> None:
+async def _announce_dropouts(message: Message, just_dealt: list[tuple[str, int]]) -> None:
     """Отдельное сообщение «🧳 Закрыли кейс: …» сразу после применения Deal.
 
     Одно агрегированное сообщение даже если ушло несколько игроков — меньше
@@ -776,8 +770,7 @@ async def _announce_dropouts(
         text = f"🧳 <b>{escape(name)}</b> закрыл кейс с {_fmt_rub(amount)}"
     else:
         parts = ", ".join(
-            f"<b>{escape(name)}</b> ({_fmt_rub_compact(amount)} ₽)"
-            for name, amount in just_dealt
+            f"<b>{escape(name)}</b> ({_fmt_rub_compact(amount)} ₽)" for name, amount in just_dealt
         )
         text = f"🧳 Закрыли кейс: {parts}"
     try:
@@ -819,9 +812,8 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
         if deal.get_session(chat_id) is not session:
             return
         try:
-            if (
-                session.phase is deal.DealPhase.FINAL_SWAP
-                and not deal.all_active_decided_swap(session)
+            if session.phase is deal.DealPhase.FINAL_SWAP and not deal.all_active_decided_swap(
+                session
             ):
                 deal.force_finalize_swap_on_timeout(session)
                 await _finalize_and_summarize(message, session)
@@ -881,15 +873,11 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
     # offer_prev — предыдущий офер из истории. На первом банкер-раунде None;
     # история уже содержит текущий офер (transition_to_banker сделал append),
     # поэтому prev — это [-2].
-    offer_prev = (
-        session.offer_history[-2] if len(session.offer_history) >= 2 else None
-    )
+    offer_prev = session.offer_history[-2] if len(session.offer_history) >= 2 else None
     remaining = deal.remaining_values(session)
     remaining_avg = int(sum(remaining) / len(remaining)) if remaining else 0
     max_remaining = max(remaining) if remaining else 0
-    opened_vals = [
-        session.case_values[c] for c in session.current_round_opened
-    ]
+    opened_vals = [session.case_values[c] for c in session.current_round_opened]
     last_max = max(opened_vals) if opened_vals else 0
     # Top-3 сумм этого раунда — даём LLM конкретику, на что реагировать.
     opened_top = sorted(opened_vals, reverse=True)[:3]
@@ -902,9 +890,7 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
             "name": p.name,
             "status": p.status,
             "winnings": p.winnings if p.status == "dealt" else None,
-            "dealt_round": (
-                p.deal_round_idx + 1 if p.deal_round_idx is not None else None
-            ),
+            "dealt_round": (p.deal_round_idx + 1 if p.deal_round_idx is not None else None),
         }
         for p in session.players.values()
     ]
@@ -1521,10 +1507,7 @@ async def on_next(cb: CallbackQuery) -> None:
         await _render(cb.message, session, edit=True)
         await cb.answer("Сначала откройте все кейсы раунда.")
         return
-    if (
-        session.phase is deal.DealPhase.FINAL_SWAP
-        and not deal.all_active_decided_swap(session)
-    ):
+    if session.phase is deal.DealPhase.FINAL_SWAP and not deal.all_active_decided_swap(session):
         await _render(cb.message, session, edit=True)
         await cb.answer("Не все ещё решили.")
         return
@@ -1625,9 +1608,7 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
 
     # Доска — последняя картина состояния, без клавиатуры.
     with _suppress_edit_noop():
-        await message.edit_text(
-            _text_finished_board(session), parse_mode="HTML", reply_markup=None
-        )
+        await message.edit_text(_text_finished_board(session), parse_mode="HTML", reply_markup=None)
 
     await _drama_replay(message, session)
 

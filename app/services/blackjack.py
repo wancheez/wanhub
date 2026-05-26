@@ -488,9 +488,7 @@ def set_running_bet(
     return BetUpdateResult.OK, player.running_bet
 
 
-def confirm_bet(
-    session: BlackjackSession, user_id: int, balance: int
-) -> BetResult:
+def confirm_bet(session: BlackjackSession, user_id: int, balance: int) -> BetResult:
     """Зафиксировать `running_bet` как окончательную ставку.
 
     Стек должен быть > 0 (иначе INVALID_AMOUNT) и ≤ balance (иначе
@@ -728,8 +726,7 @@ def reveal_hole(session: BlackjackSession) -> None:
     # Если у всех игроков уже исход выставлен и они проиграли/PUSH — добор
     # дилера ничего не меняет. Открываем hole и фиксируем done.
     any_live = any(
-        p.hand is not None
-        and p.hand.outcome not in (OutcomeKind.BUST, OutcomeKind.LOSS)
+        p.hand is not None and p.hand.outcome not in (OutcomeKind.BUST, OutcomeKind.LOSS)
         for p in session.players.values()
     )
     if not any_live:
