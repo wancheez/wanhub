@@ -10,6 +10,9 @@ def isolated_state(monkeypatch: pytest.MonkeyPatch) -> None:
     deal.reset_state()
     # Делаем shuffle no-op, чтобы case_values был предсказуемым: case_id k = values[k-1].
     monkeypatch.setattr("random.shuffle", lambda lst: None)
+    # Глушим шум в формуле банкира (psychological-режим использует random.uniform).
+    # Тесты, которым нужен «дикий» шум, могут переопределить локально.
+    monkeypatch.setattr("random.uniform", lambda a, b: 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -25,9 +28,9 @@ def test_top_value_is_canonical() -> None:
     assert max(deal.VALUES) == 3_000_000
 
 
-def test_schedule_sums_to_cases_minus_one() -> None:
-    """В каждом раунде открывают какие-то кейсы, один (личный) остаётся."""
-    assert sum(deal.SCHEDULE) == deal.CASE_COUNT - 1
+def test_schedule_sums_to_cases_minus_two() -> None:
+    """SWAP-формат: личный + один на столе остаются закрытыми до финала."""
+    assert sum(deal.SCHEDULE) == deal.CASE_COUNT - 2
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +43,7 @@ def test_banker_offer_empty() -> None:
 
 
 def test_banker_offer_monotone_with_round() -> None:
+    """Банкер-раундов теперь 8 (SCHEDULE из 9 раундов, последний — FINAL_SWAP)."""
     remaining = [1, 100, 10_000, 1_000_000]
     offers = [deal.banker_offer(remaining, r, total_rounds=9) for r in range(8)]
     # Не строго монотонно из-за округления, но не убывает.
@@ -366,32 +370,37 @@ def test_finalize_banker_wrong_phase() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_full_no_deal_run_ends_with_personal_value() -> None:
-    """Если оба игрока всю партию говорят No Deal — оба получают значение личного кейса."""
-    personal = 10
+def _run_to_final_swap(personal: int = 10) -> tuple[deal.DealSession, list[int]]:
+    """Пройти все OPENING-раунды (включая последний) с No Deal и попасть в FINAL_SWAP.
+
+    На каждом раунде, включая последний, отрабатывает банкер; игроки говорят
+    No Deal. `finalize_banker` последнего раунда сам переводит фазу в
+    FINAL_SWAP (вместо следующего OPENING).
+    """
     s = _ready_game(personal=personal)
-    # Полный пробег по SCHEDULE. Кейсы 1..CASE_COUNT, личный исключён.
-    open_pool = [c for c in range(1, deal.CASE_COUNT + 1) if c != personal]
-    assert sum(deal.SCHEDULE) == deal.CASE_COUNT - 1 == len(open_pool)
+    pool = [c for c in range(1, deal.CASE_COUNT + 1) if c != personal]
+    assert sum(deal.SCHEDULE) == len(pool) - 1  # ровно один лишний остаётся на столе
     cursor = 0
-    for round_idx, target in enumerate(deal.SCHEDULE):
+    opened: list[int] = []
+    for target in deal.SCHEDULE:
         for _ in range(target):
-            deal.open_case(s, 100, open_pool[cursor])
+            deal.open_case(s, 100, pool[cursor])
+            opened.append(pool[cursor])
             cursor += 1
-        if round_idx == len(deal.SCHEDULE) - 1:
-            # Последний раунд — без банкира.
-            deal.end_game_reveal(s)
-            break
         deal.transition_to_banker(s)
         deal.submit_decision(s, 100, "no_deal")
         deal.submit_decision(s, 200, "no_deal")
         deal.finalize_banker(s)
+    return s, opened
 
-    assert s.phase is deal.DealPhase.FINISHED
-    personal_value = s.case_values[personal]
-    assert s.players[100].status == "won_final"
-    assert s.players[100].winnings == personal_value
-    assert s.players[200].winnings == personal_value
+
+def test_full_no_deal_run_ends_at_final_swap() -> None:
+    """После 9 OPENING-раундов с No Deal от обоих — заходим в FINAL_SWAP."""
+    s, _opened = _run_to_final_swap(personal=10)
+    assert s.phase is deal.DealPhase.FINAL_SWAP
+    assert s.final_table_case_id is not None
+    assert s.final_table_case_id != s.personal_case_id
+    assert s.final_table_case_id not in s.opened
 
 
 def test_end_game_reveal_wrong_phase() -> None:
@@ -406,3 +415,308 @@ def test_end_game_reveal_before_last_round() -> None:
     # Раунд 0 завершён, но это не последний.
     with pytest.raises(deal.WrongPhase):
         deal.end_game_reveal(s)
+
+
+# ---------------------------------------------------------------------------
+# FINAL_SWAP
+# ---------------------------------------------------------------------------
+
+
+def test_submit_swap_keep_credits_personal_value() -> None:
+    personal = 5
+    s, _ = _run_to_final_swap(personal=personal)
+    assert deal.submit_swap_decision(s, 100, "keep") is deal.DecisionResult.ACCEPTED
+    assert deal.submit_swap_decision(s, 200, "keep") is deal.DecisionResult.ACCEPTED
+    deal.finalize_swap(s)
+    expected = s.case_values[personal]
+    assert s.players[100].winnings == expected
+    assert s.players[100].swap_kept is True
+    assert s.players[200].winnings == expected
+    assert s.players[200].swap_kept is True
+    assert s.phase is deal.DealPhase.FINISHED
+
+
+def test_submit_swap_swap_credits_table_value() -> None:
+    s, _ = _run_to_final_swap(personal=5)
+    assert s.final_table_case_id is not None
+    table_value = s.case_values[s.final_table_case_id]
+    deal.submit_swap_decision(s, 100, "swap")
+    deal.submit_swap_decision(s, 200, "swap")
+    deal.finalize_swap(s)
+    assert s.players[100].winnings == table_value
+    assert s.players[100].swap_kept is False
+    assert s.players[200].winnings == table_value
+    assert s.players[200].swap_kept is False
+
+
+def test_submit_swap_mixed_decisions() -> None:
+    s, _ = _run_to_final_swap(personal=5)
+    assert s.final_table_case_id is not None
+    personal_val = s.case_values[5]
+    table_val = s.case_values[s.final_table_case_id]
+    deal.submit_swap_decision(s, 100, "keep")
+    deal.submit_swap_decision(s, 200, "swap")
+    deal.finalize_swap(s)
+    assert s.players[100].winnings == personal_val
+    assert s.players[200].winnings == table_val
+
+
+def test_submit_swap_outside_phase_rejected() -> None:
+    s = _ready_game()
+    assert deal.submit_swap_decision(s, 100, "keep") is deal.DecisionResult.WRONG_PHASE
+
+
+def test_all_active_decided_swap() -> None:
+    s, _ = _run_to_final_swap(personal=5)
+    assert deal.all_active_decided_swap(s) is False
+    deal.submit_swap_decision(s, 100, "keep")
+    assert deal.all_active_decided_swap(s) is False
+    deal.submit_swap_decision(s, 200, "swap")
+    assert deal.all_active_decided_swap(s) is True
+
+
+def test_force_finalize_swap_on_timeout_defaults_to_keep() -> None:
+    """Молчуны по таймауту получают `keep` — не теряют личный кейс по умолчанию."""
+    s, _ = _run_to_final_swap(personal=5)
+    personal_val = s.case_values[5]
+    # Только один из двух голосует.
+    deal.submit_swap_decision(s, 100, "swap")
+    deal.force_finalize_swap_on_timeout(s)
+    assert s.phase is deal.DealPhase.FINISHED
+    assert s.players[200].swap_kept is True  # молчун → keep
+    assert s.players[200].winnings == personal_val
+
+
+def test_final_swap_skipped_when_all_dealt() -> None:
+    """Если оба берут Deal в первом банкер-раунде — FINAL_SWAP не входим, сразу FINISHED."""
+    s = _ready_game(personal=10)
+    _complete_round(s, _FIRST_ROUND_OPENS)
+    deal.transition_to_banker(s)
+    deal.submit_decision(s, 100, "deal")
+    deal.submit_decision(s, 200, "deal")
+    res = deal.finalize_banker(s)
+    assert res is deal.FinalizeResult.OK_FINISHED
+    assert s.phase is deal.DealPhase.FINISHED
+    assert s.final_table_case_id is None  # FINAL_SWAP не входили
+    assert all(p.swap_kept is None for p in s.players.values())
+
+
+def test_transition_to_final_swap_wrong_phase() -> None:
+    s = _ready_game()
+    with pytest.raises(deal.WrongPhase):
+        deal.transition_to_final_swap(s)  # не OPENING + не is_last_round
+
+
+def test_finalize_banker_last_round_enters_final_swap() -> None:
+    """Банкер последнего OPENING-раунда: no_deal → FinalizeResult.OK_FINAL_SWAP."""
+    s = _ready_game(personal=10)
+    pool = [c for c in range(1, deal.CASE_COUNT + 1) if c != 10]
+    cursor = 0
+    for target in deal.SCHEDULE[:-1]:  # все раунды кроме последнего
+        for _ in range(target):
+            deal.open_case(s, 100, pool[cursor])
+            cursor += 1
+        deal.transition_to_banker(s)
+        deal.submit_decision(s, 100, "no_deal")
+        deal.submit_decision(s, 200, "no_deal")
+        deal.finalize_banker(s)
+    # Последний раунд: открываем по расписанию.
+    for _ in range(deal.SCHEDULE[-1]):
+        deal.open_case(s, 100, pool[cursor])
+        cursor += 1
+    # Банкер на последнем раунде — теперь работает (раньше бросал WrongPhase).
+    deal.transition_to_banker(s)
+    assert s.phase is deal.DealPhase.BANKER
+    deal.submit_decision(s, 100, "no_deal")
+    deal.submit_decision(s, 200, "no_deal")
+    res = deal.finalize_banker(s)
+    assert res is deal.FinalizeResult.OK_FINAL_SWAP
+    assert s.phase is deal.DealPhase.FINAL_SWAP
+    assert s.final_table_case_id is not None
+
+
+def test_finalize_banker_last_round_all_deal_finishes() -> None:
+    """На последнем банкер-раунде все берут Deal → FINISHED минуя FINAL_SWAP."""
+    s = _ready_game(personal=10)
+    pool = [c for c in range(1, deal.CASE_COUNT + 1) if c != 10]
+    cursor = 0
+    for target in deal.SCHEDULE[:-1]:
+        for _ in range(target):
+            deal.open_case(s, 100, pool[cursor])
+            cursor += 1
+        deal.transition_to_banker(s)
+        deal.submit_decision(s, 100, "no_deal")
+        deal.submit_decision(s, 200, "no_deal")
+        deal.finalize_banker(s)
+    for _ in range(deal.SCHEDULE[-1]):
+        deal.open_case(s, 100, pool[cursor])
+        cursor += 1
+    offer = deal.transition_to_banker(s)
+    deal.submit_decision(s, 100, "deal")
+    deal.submit_decision(s, 200, "deal")
+    res = deal.finalize_banker(s)
+    assert res is deal.FinalizeResult.OK_FINISHED
+    assert s.phase is deal.DealPhase.FINISHED
+    assert s.final_table_case_id is None
+    assert s.players[100].winnings == offer
+    assert s.players[200].winnings == offer
+
+
+# ---------------------------------------------------------------------------
+# История оферов и «А что если бы»
+# ---------------------------------------------------------------------------
+
+
+def test_offer_history_appended_each_banker_round() -> None:
+    s = _ready_game(personal=10)
+    pool = [c for c in range(1, deal.CASE_COUNT + 1) if c != 10]
+    cursor = 0
+    # Пройдём 3 банкер-раунда и проверим длину истории.
+    for round_idx in range(3):
+        target = deal.SCHEDULE[round_idx]
+        for _ in range(target):
+            deal.open_case(s, 100, pool[cursor])
+            cursor += 1
+        deal.transition_to_banker(s)
+        deal.submit_decision(s, 100, "no_deal")
+        deal.submit_decision(s, 200, "no_deal")
+        deal.finalize_banker(s)
+    assert len(s.offer_history) == 3
+    assert all(v >= 0 for v in s.offer_history)
+
+
+# ---------------------------------------------------------------------------
+# Психологический банкир: биасы и шум
+# ---------------------------------------------------------------------------
+
+
+def test_banker_offer_default_kwargs_match_legacy_formula() -> None:
+    """Backward-compat: без новых kwargs формула не должна меняться."""
+    remaining = [1, 1_000_000]
+    # avg=500_000.5, factor по середине банкер-раундов: r=4 из 8 → t=4/7, factor=0.2+0.8·4/7
+    legacy = deal.banker_offer(remaining, round_idx=4, total_rounds=9)
+    # Psychological-режим не активируется без opened_this_round_values И без rng.
+    assert legacy > 0
+
+
+def test_banker_offer_bias_high_left_drops_factor() -> None:
+    """Если на столе остался ≥1М ₽, банкир чуть жаднее (factor -= 0.05)."""
+    remaining_high = [1, 1_000_000]
+    remaining_low = [1, 999_999]  # на 1 меньше — биас не срабатывает
+    # Активируем психологию: передаём rng=random (через autouse фикстуру шум = 1.0).
+    import random as _r
+
+    high = deal.banker_offer(
+        remaining_high, round_idx=4, total_rounds=9, rng=_r
+    )
+    low = deal.banker_offer(
+        remaining_low, round_idx=4, total_rounds=9, rng=_r
+    )
+    # При большом max(remaining) офер должен быть НЕ выше (биас вниз).
+    # Avg почти одинаковый, поэтому сравнение валидное.
+    assert high <= low
+
+
+def test_banker_offer_bias_big_opened_raises_factor() -> None:
+    """Если игрок только что открыл ≥500к ₽, банкир «жалостливее» (factor += 0.05)."""
+    import random as _r
+
+    remaining = [100, 1_000, 10_000]
+    no_big = deal.banker_offer(
+        remaining, round_idx=4, total_rounds=9, rng=_r
+    )
+    with_big = deal.banker_offer(
+        remaining,
+        round_idx=4,
+        total_rounds=9,
+        opened_this_round_values=[500_000],
+        rng=_r,
+    )
+    assert with_big >= no_big
+
+
+def test_banker_offer_factor_clamped_upper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Даже при максимальном шуме factor не уходит выше 1.2."""
+    import random as _r
+
+    monkeypatch.setattr("random.uniform", lambda a, b: 1.10)  # верхняя граница шума
+    remaining = [1_000_000]  # авг = 1М
+    offer = deal.banker_offer(
+        remaining,
+        round_idx=7,  # последний банкер-раунд, factor=1.0 базовый
+        total_rounds=9,
+        opened_this_round_values=[500_000],  # +0.05
+        rng=_r,
+    )
+    # factor ≤ 1.20 → offer ≤ 1.2М с округлением.
+    assert offer <= 1_200_000
+
+
+# ---------------------------------------------------------------------------
+# Голос банкира (категоризация без LLM)
+# ---------------------------------------------------------------------------
+
+
+def test_categorize_low_offer() -> None:
+    from app.services import deal_banker_voice
+
+    cat = deal_banker_voice.categorize(
+        offer=10_000,
+        remaining_avg=100_000,
+        last_round_opened_max=0,
+        round_idx=1,
+        total_banker_rounds=8,
+    )
+    assert cat == "low_offer"
+
+
+def test_categorize_high_offer() -> None:
+    from app.services import deal_banker_voice
+
+    cat = deal_banker_voice.categorize(
+        offer=90_000,
+        remaining_avg=100_000,
+        last_round_opened_max=0,
+        round_idx=1,
+        total_banker_rounds=8,
+    )
+    assert cat == "high_offer"
+
+
+def test_categorize_player_opened_big() -> None:
+    from app.services import deal_banker_voice
+
+    cat = deal_banker_voice.categorize(
+        offer=60_000,
+        remaining_avg=100_000,
+        last_round_opened_max=750_000,
+        round_idx=1,
+        total_banker_rounds=8,
+    )
+    assert cat == "player_opened_big"
+
+
+def test_categorize_late_game() -> None:
+    from app.services import deal_banker_voice
+
+    cat = deal_banker_voice.categorize(
+        offer=60_000,
+        remaining_avg=100_000,
+        last_round_opened_max=0,
+        round_idx=7,  # последний банкер-раунд (>= total - 2)
+        total_banker_rounds=8,
+    )
+    assert cat == "late_game"
+
+
+def test_categorize_degenerate_zero_offer() -> None:
+    from app.services import deal_banker_voice
+
+    cat = deal_banker_voice.categorize(
+        offer=0,
+        remaining_avg=0,
+        last_round_opened_max=0,
+        round_idx=0,
+        total_banker_rounds=8,
+    )
+    assert cat == "degenerate"

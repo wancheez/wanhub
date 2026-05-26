@@ -30,7 +30,14 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.config import TELEGRAM_ADMIN_ID
-from app.services import blackjack, deal, deal_db, deal_weekly, games
+from app.services import (
+    blackjack,
+    deal,
+    deal_banker_voice,
+    deal_db,
+    deal_weekly,
+    games,
+)
 
 router = Router(name="deal")
 log = logging.getLogger("app")
@@ -48,6 +55,8 @@ _CB_NO_DEAL = "dl:nd:"
 _CB_NEXT = "dl:nx:"
 _CB_CANCEL = "dl:x:"
 _CB_PERSONAL_VIEW = "dl:pv:"
+_CB_KEEP = "dl:k:"
+_CB_SWAP = "dl:sw:"
 _CB_NOOP = "dl:noop"
 _PERSONAL_RANDOM = "r"  # значение CID для «случайный кейс»
 
@@ -76,6 +85,15 @@ def _case_emoji(case_id: int) -> str:
 _AUTO_ADVANCE_SECONDS = 30
 _AUTO_ADVANCE_HINT = f"(авто через {_AUTO_ADVANCE_SECONDS} сек)"
 _auto_advance_tasks: dict[int, asyncio.Task[None]] = {}
+
+# Background-таска получения реплики банкира от LLM. Стартует после
+# `transition_to_banker`, не блокирует UI: пользователь видит офер сразу,
+# реплика дописывается через edit_text как только LLM ответит (~0.5–3 сек).
+_voice_tasks: dict[int, asyncio.Task[None]] = {}
+
+# Длительность пауз драм-реплея в финале. 2 сек — узнаваемо «ТВ»-ритмично,
+# но не так долго, чтобы зритель в чате терял нить.
+_DRAMA_PAUSE_SECONDS = 2.0
 
 
 def _grid_sizes(button_count: int, width: int) -> tuple[int, ...]:
@@ -278,6 +296,16 @@ def _kb_next(chat_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def _kb_final_swap(chat_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🎒 Оставить", callback_data=f"{_CB_KEEP}{chat_id}"),
+        InlineKeyboardButton(text="🔄 Поменять", callback_data=f"{_CB_SWAP}{chat_id}"),
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{_CB_CANCEL}{chat_id}"))
+    return builder.as_markup()
+
+
 # ---------------------------------------------------------------------------
 # Тексты по фазам
 # ---------------------------------------------------------------------------
@@ -309,8 +337,12 @@ def _rules_text() -> str:
         "  • ❌ <b>Не сделка</b> — играешь дальше\n"
         "Раунд продолжается, как только все определились.\n"
         "\n"
-        "🏁 <b>Финал.</b> Если дошёл до последнего раунда без сделки — "
-        "получаешь сумму из личного кейса.\n"
+        "🏁 <b>Финал и SWAP.</b> Когда раундов больше нет, на столе остаётся "
+        "ровно два закрытых кейса: твой личный и один на столе. Каждый, кто "
+        "дошёл до финала, выбирает сам:\n"
+        "  • 🎒 <b>Оставить</b> — забираешь личный\n"
+        "  • 🔄 <b>Поменять</b> — забираешь тот, что на столе\n"
+        "Один может оставить, другой поменять — кейсы общие, выбор личный.\n"
         "\n"
         "🏆 <b>Рейтинг чата:</b> /dealtop — топ текущей недели по среднему "
         "выигрышу за партию.\n"
@@ -412,6 +444,21 @@ def _text_opening(session: deal.DealSession) -> str:
     return "\n".join(lines)
 
 
+def _offer_history_line(session: deal.DealSession) -> str | None:
+    """Строка вида `📈 25к → 60к → [120к]` из `offer_history`.
+
+    Последний элемент — текущий офер, обёрнут в [скобки] для акцента. None
+    если истории нет (например, мы в первом BANKER-раунде).
+    """
+    if not session.offer_history:
+        return None
+    if len(session.offer_history) == 1:
+        return None  # одна точка — не «история»; не загромождаем UI.
+    parts = [_fmt_rub_compact(v) for v in session.offer_history]
+    parts[-1] = f"[{parts[-1]}]"
+    return "📈 " + " → ".join(parts)
+
+
 def _text_banker(session: deal.DealSession) -> str:
     total_rounds = len(session.round_schedule)
     offer = session.current_offer or 0
@@ -428,6 +475,18 @@ def _text_banker(session: deal.DealSession) -> str:
         f"<b>💼 Раунд {session.round_idx + 1}/{total_rounds} — банкир предлагает</b>",
         f"<b>{_fmt_rub(offer)}</b>",
     ]
+    history_line = _offer_history_line(session)
+    if history_line is not None:
+        lines.append(history_line)
+    if session.last_banker_line:
+        # Реплика появится либо сразу из кэша, либо через 0.5–3 сек после того,
+        # как LLM-таска допишет её в edit_text. `<blockquote>` рендерится в
+        # Telegram отдельным блоком с вертикальной чертой слева — реплика
+        # визуально выделена и не сливается с цифрами офера.
+        lines.append(
+            f"<blockquote>🎩 <b>Банкир:</b> <i>{escape(session.last_banker_line)}</i>"
+            "</blockquote>"
+        )
     # Что открыли в этом раунде — суммы, на которые банкир и среагировал.
     if session.current_round_opened:
         opened_vals = sorted(
@@ -456,15 +515,117 @@ def _text_banker(session: deal.DealSession) -> str:
     return "\n".join(lines)
 
 
-def _text_finished_board(session: deal.DealSession) -> str:
-    """Финальное состояние «доски»: всё открыто, без клавиатуры."""
-    lines = [
-        "<b>💼 Сделка или нет — финал</b>",
-        "Партия окончена. Итог — в следующем сообщении 👇",
-        "",
-        _value_sidebar(session),
+def _text_final_swap(session: deal.DealSession) -> str:
+    """Текст фазы FINAL_SWAP: два закрытых кейса, кто как решил, кого ждём."""
+    assert session.personal_case_id is not None
+    assert session.final_table_case_id is not None
+    decisions = session.swap_decisions
+    keep_names = [_player_name(session, uid) for uid, c in decisions.items() if c == "keep"]
+    swap_names = [_player_name(session, uid) for uid, c in decisions.items() if c == "swap"]
+    pending = [
+        p.name
+        for uid, p in session.players.items()
+        if p.status == "active" and uid not in decisions
     ]
+
+    lines = [
+        "<b>💼 Сделка или нет — ФИНАЛ</b>",
+        (
+            f"Остались два закрытых кейса: личный {_case_emoji(session.personal_case_id)} "
+            f"и кейс {_case_emoji(session.final_table_case_id)} на столе."
+        ),
+        "🎒 <b>Оставить</b> — заберёшь личный. 🔄 <b>Поменять</b> — возьмёшь тот, что на столе.",
+        "",
+    ]
+    if keep_names:
+        lines.append("🎒 Оставили: " + ", ".join(escape(n) for n in keep_names))
+    if swap_names:
+        lines.append("🔄 Поменяли: " + ", ".join(escape(n) for n in swap_names))
+    if pending:
+        lines.append("Ждём решение: " + ", ".join(escape(n) for n in pending))
+    else:
+        lines.append(f"✅ Все решили. <b>⏭ Далее</b> — любой игрок {_AUTO_ADVANCE_HINT}.")
+    lines.append("")
+    lines.append(_value_sidebar(session))
     return "\n".join(lines)
+
+
+def _text_finished_board(session: deal.DealSession) -> str:
+    """Замороженное состояние финального сообщения перед драм-реплеем.
+
+    Цель — зафиксировать «что выбрали» без дубля value-sidebar (он только что
+    был показан в FINAL_SWAP / BANKER) и без отсылки «итог в следующем
+    сообщении» — дальше идёт цепочка драм-реплея, не одно сообщение.
+    """
+    lines: list[str] = ["<b>💼 Сделка или нет — финал</b>"]
+    if session.swap_decisions:
+        keep_names = [
+            _player_name(session, uid)
+            for uid, c in session.swap_decisions.items()
+            if c == "keep"
+        ]
+        swap_names = [
+            _player_name(session, uid)
+            for uid, c in session.swap_decisions.items()
+            if c == "swap"
+        ]
+        if keep_names:
+            lines.append("🎒 Оставили: " + ", ".join(escape(n) for n in keep_names))
+        if swap_names:
+            lines.append("🔄 Поменяли: " + ", ".join(escape(n) for n in swap_names))
+    else:
+        # Сценарий «все взяли сделку до финала» — FINAL_SWAP не входили.
+        lines.append("<i>Все игроки взяли сделку.</i>")
+    lines.append("")
+    lines.append("<i>🎰 Раскрываем итог…</i>")
+    return "\n".join(lines)
+
+
+def _what_if_line(session: deal.DealSession, p: deal.PlayerState) -> str | None:
+    """«А что если бы»: что игрок упустил своим выбором.
+
+    Два сценария:
+      • `dealt` — показываем все оферы банкира ПОСЛЕ его сделки + сколько было
+        в общем личном кейсе.
+      • `won_final` со swap_kept — показываем, что было бы при другом выборе:
+        для swap'нувшего → личный, для оставшего → значение стола.
+    None если показывать нечего.
+    """
+    if p.status == "dealt" and p.deal_round_idx is not None:
+        later = session.offer_history[p.deal_round_idx + 1 :]
+        # «В личном было N» показываем только если партия дошла до SWAP — там
+        # значение личного кейса вписано в сравнение «свап-исход vs альтернатива».
+        # Иначе сумма уже выведена в шапке («Личный кейс 🐱: N»), повтор лишний.
+        had_swap = any(pp.swap_kept is not None for pp in session.players.values())
+        parts: list[str] = []
+        if later:
+            parts.append(
+                "банкер потом давал " + ", ".join(_fmt_rub_compact(v) for v in later) + " ₽"
+            )
+        if had_swap and session.personal_case_id is not None:
+            personal_value = session.case_values[session.personal_case_id]
+            parts.append(f"в личном было {_fmt_rub(personal_value)}")
+        if not parts:
+            return None
+        return "    <i>↪ " + "; ".join(parts) + "</i>"
+
+    if (
+        p.status == "won_final"
+        and p.swap_kept is not None
+        and session.personal_case_id is not None
+        and session.final_table_case_id is not None
+    ):
+        personal_val = session.case_values[session.personal_case_id]
+        table_val = session.case_values[session.final_table_case_id]
+        if p.swap_kept is True:
+            alt = table_val
+            text = f"если бы поменял — взял бы <b>{_fmt_rub(alt)}</b>"
+        else:
+            alt = personal_val
+            text = f"если бы оставил личный — взял бы <b>{_fmt_rub(alt)}</b>"
+        return f"    <i>↪ {text}</i>"
+
+    return None
 
 
 def _text_end_summary(session: deal.DealSession) -> str:
@@ -473,11 +634,21 @@ def _text_end_summary(session: deal.DealSession) -> str:
         if session.personal_case_id is not None
         else None
     )
+    table_value = (
+        session.case_values.get(session.final_table_case_id)
+        if session.final_table_case_id is not None
+        else None
+    )
     lines = [f"<b>🏁 Игра окончена</b> · {session.case_count} кейсов"]
     if personal is not None:
         assert session.personal_case_id is not None
         lines.append(
             f"Личный кейс {_case_emoji(session.personal_case_id)}: <b>{_fmt_rub(personal)}</b>"
+        )
+    if table_value is not None and session.final_table_case_id is not None:
+        lines.append(
+            f"На столе оставался {_case_emoji(session.final_table_case_id)}: "
+            f"<b>{_fmt_rub(table_value)}</b>"
         )
     lines.append("")
     rows = sorted(
@@ -490,10 +661,22 @@ def _text_end_summary(session: deal.DealSession) -> str:
         if p.status == "dealt":
             comment = f"взял сделку в р. {(p.deal_round_idx or 0) + 1}"
         elif p.status == "won_final":
-            comment = "дошёл до финала"
+            if p.swap_kept is True:
+                comment = "дошёл до финала · оставил личный"
+            elif p.swap_kept is False:
+                comment = "дошёл до финала · поменял"
+            else:
+                comment = "дошёл до финала"
         else:
             comment = "не сыграл"
         lines.append(f"{prefix} <b>{escape(p.name)}</b> — {_fmt_rub(p.winnings)} · {comment}")
+        wif = _what_if_line(session, p)
+        if wif is not None:
+            lines.append(wif)
+    # Кликабельная команда в plain-тексте: Telegram сам подсветит /deal как
+    # быстрый запуск — без лишних кнопок.
+    lines.append("")
+    lines.append("🎲 Ещё партию — /deal")
     return "\n".join(lines)
 
 
@@ -539,28 +722,78 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
     делает и возвращает False.
     """
     if session.phase is deal.DealPhase.OPENING and deal.is_round_complete(session):
-        if deal.is_last_round(session):
-            deal.end_game_reveal(session)
-            await _finalize_and_summarize(message, session)
-        else:
-            deal.transition_to_banker(session)
-            await _bump_phase(message, session)
+        # Банкер работает на КАЖДОМ раунде, включая последний (там он торгуется
+        # на 2 закрытых кейса — личный + один на столе). Те, кто откажется,
+        # пойдут в FINAL_SWAP через `finalize_banker`.
+        deal.transition_to_banker(session)
+        await _bump_phase(message, session)
+        _start_banker_voice(message, session)
         return True
     if session.phase is deal.DealPhase.BANKER and deal.all_active_decided(session):
+        # Кто только что взял Deal — нужно для drop-out анимации. Считаем
+        # до finalize_banker: иначе у dealt-игроков status уже станет "dealt"
+        # и difference не вычислить (но проще — пройтись по round_decisions).
+        offer_just = session.current_offer or 0
+        just_dealt = [
+            (session.players[uid].name, offer_just)
+            for uid, choice in session.round_decisions.items()
+            if choice == "deal" and session.players.get(uid) is not None
+            and session.players[uid].status == "active"
+        ]
         finalize_res = deal.finalize_banker(session)
+        if just_dealt:
+            await _announce_dropouts(message, just_dealt)
         if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
             await _bump_phase(message, session)
-        else:
+        elif finalize_res is deal.FinalizeResult.OK_FINAL_SWAP:
+            # Те, кто отказался от финального офера, голосуют за SWAP.
+            # Страховка от молчания — авто-таймер с force_finalize_swap_on_timeout.
+            await _bump_phase(message, session)
+            _start_auto_advance(message, session)
+        else:  # OK_FINISHED
             await _finalize_and_summarize(message, session)
+        return True
+    if session.phase is deal.DealPhase.FINAL_SWAP and deal.all_active_decided_swap(session):
+        deal.finalize_swap(session)
+        await _finalize_and_summarize(message, session)
         return True
     return False
 
 
+async def _announce_dropouts(
+    message: Message, just_dealt: list[tuple[str, int]]
+) -> None:
+    """Отдельное сообщение «🧳 Закрыли кейс: …» сразу после применения Deal.
+
+    Одно агрегированное сообщение даже если ушло несколько игроков — меньше
+    шума в чате и одна I/O-операция. Без клавиатуры; падение глушим, оно не
+    должно ронять основной поток.
+    """
+    if not just_dealt:
+        return
+    if len(just_dealt) == 1:
+        name, amount = just_dealt[0]
+        text = f"🧳 <b>{escape(name)}</b> закрыл кейс с {_fmt_rub(amount)}"
+    else:
+        parts = ", ".join(
+            f"<b>{escape(name)}</b> ({_fmt_rub_compact(amount)} ₽)"
+            for name, amount in just_dealt
+        )
+        text = f"🧳 Закрыли кейс: {parts}"
+    try:
+        await message.answer(text, parse_mode="HTML")
+    except TelegramAPIError:
+        log.exception("deal: dropout announcement failed")
+
+
 def _cancel_auto_advance(chat_id: int) -> None:
-    """Снять висящий таймер авто-перехода для чата, если есть."""
+    """Снять висящий таймер авто-перехода и LLM-таску голоса банкира."""
     task = _auto_advance_tasks.pop(chat_id, None)
     if task is not None and not task.done():
         task.cancel()
+    voice = _voice_tasks.pop(chat_id, None)
+    if voice is not None and not voice.done():
+        voice.cancel()
 
 
 def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
@@ -570,8 +803,12 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
     уже другая (отмена/новая партия) — таймер тихо отменяется. Если условие
     готовности больше не выполняется (гонка) — просто перерисовываем UI,
     чтобы он отразил реальное состояние.
+
+    Особый случай — FINAL_SWAP: если по таймеру не все активные проголосовали,
+    добиваем недостающие как «keep» через `force_finalize_swap_on_timeout`,
+    иначе игра «зависнет» с молчащими игроками.
     """
-    _cancel_auto_advance(session.chat_id)
+    _cancel_auto_advance_only(session.chat_id)
     chat_id = session.chat_id
 
     async def _runner() -> None:
@@ -582,6 +819,13 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
         if deal.get_session(chat_id) is not session:
             return
         try:
+            if (
+                session.phase is deal.DealPhase.FINAL_SWAP
+                and not deal.all_active_decided_swap(session)
+            ):
+                deal.force_finalize_swap_on_timeout(session)
+                await _finalize_and_summarize(message, session)
+                return
             advanced = await _try_advance(message, session)
             if not advanced:
                 # Условие готовности «уплыло» — рефрешим сообщение под актуальное.
@@ -595,6 +839,136 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
                 _auto_advance_tasks.pop(chat_id, None)
 
     _auto_advance_tasks[chat_id] = asyncio.create_task(_runner())
+
+
+def _cancel_auto_advance_only(chat_id: int) -> None:
+    """Снять только таймер авто-перехода. LLM-таску голоса не трогаем —
+    она независимая, у неё свой жизненный цикл (см. `_start_banker_voice`).
+    """
+    task = _auto_advance_tasks.pop(chat_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
+    """Запросить у LLM реплику банкира под текущий офер. Не блокирует UI.
+
+    Параллельно с UI-отрисовкой: получаем строку через `banker_line`, кладём
+    в `session.last_banker_line` и редактируем актуальное banker-сообщение,
+    чтобы добавить реплику в тело. Любая ошибка/таймаут — `banker_line` сам
+    отдаст fallback из статики, так что таска практически не «падает».
+
+    Важно: редактируем именно `session.current_message_id`, а не переданный
+    `message`. На момент вызова `_bump_phase` уже отправил свежее banker-
+    сообщение и обновил `current_message_id`; исходный же `message` — это
+    устаревшее сообщение прошлой фазы (OPENING). Если редактировать его, на
+    нём появится текст и клавиатура BANKER-фазы — фантомное окно.
+    """
+    chat_id = session.chat_id
+    # Старая таска (от прошлого раунда) могла ещё жить — отменим.
+    prev = _voice_tasks.pop(chat_id, None)
+    if prev is not None and not prev.done():
+        prev.cancel()
+
+    bot = message.bot
+    target_message_id = session.current_message_id
+    if bot is None or target_message_id is None:
+        return  # нечего редактировать
+
+    total_rounds = len(session.round_schedule)
+    total_banker_rounds = max(total_rounds - 1, 1)
+    offer = session.current_offer or 0
+    # offer_prev — предыдущий офер из истории. На первом банкер-раунде None;
+    # история уже содержит текущий офер (transition_to_banker сделал append),
+    # поэтому prev — это [-2].
+    offer_prev = (
+        session.offer_history[-2] if len(session.offer_history) >= 2 else None
+    )
+    remaining = deal.remaining_values(session)
+    remaining_avg = int(sum(remaining) / len(remaining)) if remaining else 0
+    max_remaining = max(remaining) if remaining else 0
+    opened_vals = [
+        session.case_values[c] for c in session.current_round_opened
+    ]
+    last_max = max(opened_vals) if opened_vals else 0
+    # Top-3 сумм этого раунда — даём LLM конкретику, на что реагировать.
+    opened_top = sorted(opened_vals, reverse=True)[:3]
+    round_idx = session.round_idx
+
+    # Игроки: имя, статус, сумма по сделке (если уже вылетел), раунд сделки.
+    # LLM использует это чтобы при желании назвать имя.
+    players_info: list[dict[str, object]] = [
+        {
+            "name": p.name,
+            "status": p.status,
+            "winnings": p.winnings if p.status == "dealt" else None,
+            "dealt_round": (
+                p.deal_round_idx + 1 if p.deal_round_idx is not None else None
+            ),
+        }
+        for p in session.players.values()
+    ]
+    # Кто что открыл в этом раунде — биггест-первое. Имя → суммы.
+    opens_by_user: dict[int, list[int]] = {}
+    for case_id, uid in session.current_round_opened_by.items():
+        val = session.case_values.get(case_id)
+        if val is None:
+            continue
+        opens_by_user.setdefault(uid, []).append(val)
+    round_opens_info: list[dict[str, object]] = []
+    for uid, vals in opens_by_user.items():
+        p = session.players.get(uid)
+        if p is None:
+            continue
+        round_opens_info.append({"name": p.name, "values": sorted(vals, reverse=True)})
+
+    async def _runner() -> None:
+        try:
+            line = await deal_banker_voice.banker_line(
+                round_idx=round_idx,
+                total_banker_rounds=total_banker_rounds,
+                offer=offer,
+                offer_prev=offer_prev,
+                remaining_avg=remaining_avg,
+                max_remaining=max_remaining,
+                last_round_opened_max=last_max,
+                opened_top=opened_top,
+                players=players_info,
+                round_opens=round_opens_info,
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("deal: chat=%d banker_voice failed", chat_id)
+            return
+        # Сессия могла уже завершиться / смениться, пока мы ждали ответ.
+        if deal.get_session(chat_id) is not session:
+            return
+        if session.phase is not deal.DealPhase.BANKER:
+            return
+        # current_message_id мог уехать (раунд закончился, дальше OPENING/FINAL_SWAP).
+        # Если так — наше редактирование уже бесполезно и фантомит kb на старом.
+        if session.current_message_id != target_message_id:
+            return
+        session.last_banker_line = line
+        text, kb = _render_payload(session)
+        try:
+            with _suppress_edit_noop():
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=target_message_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+        except TelegramAPIError:
+            # Сообщение могли удалить, или edit прошёл noop — не критично.
+            log.info("deal: chat=%d banker voice edit suppressed", chat_id)
+        finally:
+            if _voice_tasks.get(chat_id) is asyncio.current_task():
+                _voice_tasks.pop(chat_id, None)
+
+    _voice_tasks[chat_id] = asyncio.create_task(_runner())
 
 
 def _render_payload(session: deal.DealSession) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -613,6 +987,10 @@ def _render_payload(session: deal.DealSession) -> tuple[str, InlineKeyboardMarku
         if deal.all_active_decided(session):
             return _text_banker(session), _kb_next(session.chat_id)
         return _text_banker(session), _kb_banker(session.chat_id)
+    if phase is deal.DealPhase.FINAL_SWAP:
+        if deal.all_active_decided_swap(session):
+            return _text_final_swap(session), _kb_next(session.chat_id)
+        return _text_final_swap(session), _kb_final_swap(session.chat_id)
     # FINISHED
     return _text_finished_board(session), None
 
@@ -1054,6 +1432,61 @@ async def _handle_decision(
     await cb.answer("✅ Сделка принята" if choice == "deal" else "❌ Не сделка принята")
 
 
+@router.callback_query(F.data.startswith(_CB_KEEP))
+async def on_keep(cb: CallbackQuery) -> None:
+    await _handle_swap_choice(cb, "keep", _CB_KEEP)
+
+
+@router.callback_query(F.data.startswith(_CB_SWAP))
+async def on_swap(cb: CallbackQuery) -> None:
+    await _handle_swap_choice(cb, "swap", _CB_SWAP)
+
+
+async def _handle_swap_choice(
+    cb: CallbackQuery,
+    choice: str,  # Literal["keep", "swap"]
+    prefix: str,
+) -> None:
+    if cb.data is None or cb.from_user is None:
+        await cb.answer()
+        return
+    chat_id = _parse_int_tail(cb.data, prefix)
+    if chat_id is None:
+        await cb.answer("Битый callback.", show_alert=True)
+        return
+    session = _session_for_cb(cb, chat_id)
+    if session is None:
+        await cb.answer("Игра уже завершена.")
+        return
+    if choice not in ("keep", "swap"):
+        await cb.answer("Битый callback.", show_alert=True)
+        return
+    res = deal.submit_swap_decision(
+        session,
+        cb.from_user.id,
+        "keep" if choice == "keep" else "swap",
+    )
+    if res is deal.DecisionResult.NOT_ACTIVE:
+        await cb.answer("Только активные игроки финала.")
+        return
+    if res is deal.DecisionResult.ALREADY_DECIDED:
+        prev = session.swap_decisions.get(cb.from_user.id)
+        prev_label = "🎒 Оставить" if prev == "keep" else "🔄 Поменять" if prev == "swap" else "?"
+        if isinstance(cb.message, Message):
+            await _render(cb.message, session, edit=True)
+        await cb.answer(f"Ты уже выбрал: {prev_label}")
+        return
+    if res is deal.DecisionResult.WRONG_PHASE:
+        await cb.answer("Сейчас не финал.")
+        return
+
+    assert isinstance(cb.message, Message)
+    await _render(cb.message, session, edit=True)
+    if deal.all_active_decided_swap(session):
+        _start_auto_advance(cb.message, session)
+    await cb.answer("🎒 Оставил личный" if choice == "keep" else "🔄 Поменял")
+
+
 @router.callback_query(F.data.startswith(_CB_NEXT))
 async def on_next(cb: CallbackQuery) -> None:
     """⏭ Далее — переход к следующей фазе. Любой игрок партии, когда готово.
@@ -1087,6 +1520,13 @@ async def on_next(cb: CallbackQuery) -> None:
         # актуальное состояние, чтобы игрок не «застрял» на ⏭.
         await _render(cb.message, session, edit=True)
         await cb.answer("Сначала откройте все кейсы раунда.")
+        return
+    if (
+        session.phase is deal.DealPhase.FINAL_SWAP
+        and not deal.all_active_decided_swap(session)
+    ):
+        await _render(cb.message, session, edit=True)
+        await cb.answer("Не все ещё решили.")
         return
     if session.phase is deal.DealPhase.BANKER and not deal.all_active_decided(session):
         # То же самое: текст и проверка могли разойтись (например, гонка двух
@@ -1172,10 +1612,25 @@ async def on_noop(cb: CallbackQuery) -> None:
 
 
 async def _finalize_and_summarize(message: Message, session: deal.DealSession) -> None:
-    """Зафиксировать финал: обновить доску, отправить итог, записать в БД, очистить сеанс."""
+    """Зафиксировать финал: драм-реплей, итог, запись в БД, очистка сеанса.
+
+    Драм-реплей: после «доска заморожена» пауза 2 сек, затем (если был SWAP)
+    последовательно показываем личный и табличный кейсы с паузами; иначе —
+    короткое «подводим итог». Только потом — финальный summary с медалями.
+    """
+    # На время реплея гасим внешние таймеры: LLM-таска не должна дописать
+    # реплику банкира в уже-замороженное сообщение, а авто-таймер — повторить
+    # переход. До записи в БД оба должны быть мертвы.
+    _cancel_auto_advance(session.chat_id)
+
     # Доска — последняя картина состояния, без клавиатуры.
     with _suppress_edit_noop():
-        await message.edit_text(_text_finished_board(session), parse_mode="HTML", reply_markup=None)
+        await message.edit_text(
+            _text_finished_board(session), parse_mode="HTML", reply_markup=None
+        )
+
+    await _drama_replay(message, session)
+
     summary = _text_end_summary(session)
     try:
         await message.answer(summary, parse_mode="HTML")
@@ -1194,9 +1649,52 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
             dealt=(p.status == "dealt"),
             case_count=session.case_count or 0,
             round_idx=p.deal_round_idx,
+            used_swap=(p.swap_kept is not None),
+            swap_kept=p.swap_kept,
+            offer_history=list(session.offer_history) if session.offer_history else None,
         )
-    _cancel_auto_advance(session.chat_id)
     deal.cancel_session(session.chat_id)
+
+
+async def _drama_replay(message: Message, session: deal.DealSession) -> None:
+    """ТВ-ритм перед финальным summary: пауза, раскрытие кейсов, ещё пауза.
+
+    Логика:
+      • Был FINAL_SWAP (хоть у одного игрока `swap_kept` != None) →
+        вскрываем оба кейса по очереди.
+      • Никто не дошёл до финала (все взяли deal) → короткое «подводим итог».
+    Любые сбои отправки глушим — финал важнее анимации.
+    """
+    had_swap = any(p.swap_kept is not None for p in session.players.values())
+    try:
+        await asyncio.sleep(_DRAMA_PAUSE_SECONDS)
+        if had_swap and session.personal_case_id is not None:
+            await message.answer("🎬 Раскрываем оба кейса…")
+            await asyncio.sleep(_DRAMA_PAUSE_SECONDS)
+            personal_val = session.case_values[session.personal_case_id]
+            await message.answer(
+                f"👤 Личный кейс {_case_emoji(session.personal_case_id)}: "
+                f"<b>{_fmt_rub(personal_val)}</b>",
+                parse_mode="HTML",
+            )
+            await asyncio.sleep(_DRAMA_PAUSE_SECONDS)
+            if session.final_table_case_id is not None:
+                table_val = session.case_values[session.final_table_case_id]
+                await message.answer(
+                    f"🎒 На столе оставался {_case_emoji(session.final_table_case_id)}: "
+                    f"<b>{_fmt_rub(table_val)}</b>",
+                    parse_mode="HTML",
+                )
+                await asyncio.sleep(_DRAMA_PAUSE_SECONDS)
+        else:
+            await message.answer("🎬 Подводим итог…")
+            await asyncio.sleep(_DRAMA_PAUSE_SECONDS)
+    except TelegramAPIError:
+        log.warning("deal: chat=%d drama replay send failed (ignored)", session.chat_id)
+    except asyncio.CancelledError:
+        # Если внешний код отменил нас (например, /dealcancel в процессе),
+        # просто выходим — финальный summary всё равно идёт в следующем шаге.
+        raise
 
 
 class _suppress_edit_noop:

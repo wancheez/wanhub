@@ -21,7 +21,15 @@ import random
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Literal, Protocol
+
+
+class _RngLike(Protocol):
+    """Структурный тип для источника случайных чисел: подходят и `random`
+    (модуль), и `random.Random` (инстанс). Нужно нам только `uniform`.
+    """
+
+    def uniform(self, a: float, b: float) -> float: ...
 
 log = logging.getLogger("app")
 
@@ -33,6 +41,7 @@ __all__ = [
     "DealSession",
     "DecisionResult",
     "DeclineResult",
+    "FinalizeResult",
     "JoinResult",
     "OpenResult",
     "PlayerState",
@@ -41,12 +50,15 @@ __all__ = [
     "WrongPhase",
     "active_players",
     "all_active_decided",
+    "all_active_decided_swap",
     "banker_offer",
     "cancel_session",
     "create_session",
     "decline",
     "end_game_reveal",
     "finalize_banker",
+    "finalize_swap",
+    "force_finalize_swap_on_timeout",
     "get_session",
     "is_last_round",
     "is_round_complete",
@@ -57,7 +69,9 @@ __all__ = [
     "set_personal_case",
     "start_after_lobby",
     "submit_decision",
+    "submit_swap_decision",
     "transition_to_banker",
+    "transition_to_final_swap",
 ]
 
 
@@ -74,10 +88,11 @@ VALUES: list[int] = [
 ]  # fmt: skip
 
 # Расписание раундов: сколько кейсов открывается в каждом раунде.
-# Сумма == CASE_COUNT - 1 (один кейс — личный, до конца закрыт).
-# Длина расписания = всего раундов; после каждого раунда, кроме
-# последнего, есть фаза BANKER.
-SCHEDULE: list[int] = [6, 5, 4, 3, 2, 1, 1, 1, 1, 1]  # sum=25
+# Сумма == CASE_COUNT - 2: один кейс личный (закрыт до конца), один остаётся
+# на столе для финального SWAP. Длина расписания = всего раундов; после
+# каждого, кроме последнего, идёт BANKER. После последнего OPENING банкер-фазы
+# нет — сразу FINAL_SWAP.
+SCHEDULE: list[int] = [6, 5, 4, 3, 2, 1, 1, 1, 1]  # sum=24
 
 CASE_COUNT: int = 26
 
@@ -92,6 +107,7 @@ class DealPhase(Enum):
     PICK_PERSONAL = "pick_personal"
     OPENING = "opening"
     BANKER = "banker"
+    FINAL_SWAP = "final_swap"
     FINISHED = "finished"
 
 
@@ -134,6 +150,7 @@ class DecisionResult(Enum):
 
 class FinalizeResult(Enum):
     OK_NEXT_ROUND = "ok_next_round"
+    OK_FINAL_SWAP = "ok_final_swap"
     OK_FINISHED = "ok_finished"
     WRONG_PHASE = "wrong_phase"
 
@@ -156,10 +173,14 @@ class PlayerState:
     user_id: int
     name: str
     # active: ещё играет; dealt: взял предложение Банкира; won_final: дошёл
-    # до конца, забирает значение из личного кейса.
+    # до конца, забирает значение из личного кейса или из последнего на столе.
     status: Literal["active", "dealt", "won_final"] = "active"
     winnings: int = 0
     deal_round_idx: int | None = None  # на каком раунде взял сделку (для статистики)
+    # Был ли использован SWAP в финале: True = оставил личный, False = поменял.
+    # None если игрок до финала не дошёл (взял сделку) или партия не дошла
+    # до FINAL_SWAP (все вылетели раньше).
+    swap_kept: bool | None = None
 
 
 @dataclass
@@ -191,6 +212,19 @@ class DealSession:
     cases_opened_this_round: int = 0
     current_offer: int | None = None
     round_decisions: dict[int, Literal["deal", "no_deal"]] = field(default_factory=dict)
+    # История оферов банкира по индексам банкер-раундов: append в
+    # `transition_to_banker`. Используется и UI («📈 25к → 60к → [120к]»),
+    # и финальным саммари («банкер потом давал …»), и БД-статистикой.
+    offer_history: list[int] = field(default_factory=list)
+    # Решения игроков в фазе FINAL_SWAP. Аналог round_decisions, но для swap.
+    swap_decisions: dict[int, Literal["keep", "swap"]] = field(default_factory=dict)
+    # ID единственного не-личного незакрытого кейса на момент входа в FINAL_SWAP.
+    # Фиксируется в `transition_to_final_swap` чтобы UI/finalize были детерминированы.
+    final_table_case_id: int | None = None
+    # Кэш последней реплики банкира (LLM или статика) для текущего BANKER-раунда.
+    # Чтобы повторные рендеры (на каждое Deal/No Deal) не дёргали LLM заново.
+    # Сбрасывается в `transition_to_banker` (новая фаза — новая реплика).
+    last_banker_line: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     # message_id последнего активного сообщения партии (то, на котором сейчас
     # «живая» клавиатура). Обновляется хендлером после каждой отрисовки. Нужно
@@ -372,12 +406,30 @@ def active_players(session: DealSession) -> list[PlayerState]:
 # ---------------------------------------------------------------------------
 
 
-def banker_offer(remaining: list[int], round_idx: int, total_rounds: int) -> int:
+def banker_offer(
+    remaining: list[int],
+    round_idx: int,
+    total_rounds: int,
+    *,
+    opened_this_round_values: list[int] | tuple[int, ...] = (),
+    rng: _RngLike | None = None,
+) -> int:
     """Банкир предлагает avg(remaining) × factor(round_idx), округлённое.
 
-    factor линейно растёт с 0.20 (первый банкер-раунд) до 1.00 (последний
-    банкер-раунд). Последний раунд расписания — без банкира (раскрытие
-    личного кейса), поэтому банкер-раундов всего `total_rounds - 1`.
+    Базовый factor линейно растёт с 0.20 (первый банкер-раунд) до 1.00
+    (последний банкер-раунд). Последний раунд расписания — без банкира
+    (FINAL_SWAP), поэтому банкер-раундов всего `total_rounds - 1`.
+
+    «Психология»: если переданы свежие открытия и/или rng, factor получает
+    биасы и шум — банкер ведёт себя менее предсказуемо.
+      • max(remaining) ≥ 1М ₽ → factor -= 0.05 (давит на жадность).
+      • max(opened_this_round_values) ≥ 500к → factor += 0.05 (псевдо-жалость).
+      • factor *= rng.uniform(0.9, 1.1) — шум ±10%.
+      • clamp в [0.10, 1.20].
+
+    Backward-compat: при дефолтных kwargs (`opened_this_round_values=()` И
+    `rng is None`) формула строго совпадает с прежней (без биасов и шума).
+    Это держит старые тесты зелёными без правок.
     """
     if not remaining:
         return 0
@@ -390,6 +442,17 @@ def banker_offer(remaining: list[int], round_idx: int, total_rounds: int) -> int
         t = round_idx / (banker_rounds - 1)
         t = min(max(t, 0.0), 1.0)
         factor = 0.20 + 0.80 * t
+
+    psychological = bool(opened_this_round_values) or rng is not None
+    if psychological:
+        if remaining and max(remaining) >= 1_000_000:
+            factor -= 0.05
+        if opened_this_round_values and max(opened_this_round_values) >= 500_000:
+            factor += 0.05
+        noise = (rng or random).uniform(0.9, 1.1)
+        factor *= noise
+        factor = min(max(factor, 0.10), 1.20)
+
     return _round_clean(int(avg * factor))
 
 
@@ -412,21 +475,29 @@ def transition_to_banker(session: DealSession) -> int:
     """Завершить раунд открытий и выставить предложение Банкира.
 
     Возвращает сумму предложения. Сбрасывает `round_decisions`.
+    Банкер делает офер на каждом раунде, включая последний — на последнем
+    оставшихся 2 закрытых кейса (личный + один на столе). Кто принимает —
+    выходит с офером; кто отказывается — идёт в FINAL_SWAP.
     """
     if session.phase is not DealPhase.OPENING:
         raise WrongPhase(f"transition_to_banker requires OPENING, got {session.phase}")
     if not is_round_complete(session):
         raise WrongPhase("round is not complete yet")
-    if is_last_round(session):
-        raise WrongPhase("last round has no banker phase; call end_game_reveal instead")
 
+    opened_values = [
+        session.case_values[c] for c in session.current_round_opened
+    ]
     offer = banker_offer(
         remaining_values(session),
         session.round_idx,
         total_rounds=len(session.round_schedule),
+        opened_this_round_values=opened_values,
+        rng=random,
     )
     session.current_offer = offer
+    session.offer_history.append(offer)
     session.round_decisions = {}
+    session.last_banker_line = None
     session.phase = DealPhase.BANKER
     log.info(
         "deal: chat=%d round %d/%d → banker offer %d ₽",
@@ -490,6 +561,12 @@ def finalize_banker(session: DealSession) -> FinalizeResult:
         session.phase = DealPhase.FINISHED
         return FinalizeResult.OK_FINISHED
 
+    if is_last_round(session):
+        # Это был банкер на последнем OPENING-раунде. Те, кто сказал
+        # No Deal, идут в FINAL_SWAP — оставшийся не-личный кейс уже есть.
+        _enter_final_swap(session)
+        return FinalizeResult.OK_FINAL_SWAP
+
     session.round_idx += 1
     session.cases_opened_this_round = 0
     session.current_round_opened = set()
@@ -498,12 +575,41 @@ def finalize_banker(session: DealSession) -> FinalizeResult:
     return FinalizeResult.OK_NEXT_ROUND
 
 
-def end_game_reveal(session: DealSession) -> None:
-    """Финальный раунд: оставшимся «active» игрокам начислить значение личного кейса.
+def _enter_final_swap(session: DealSession) -> int:
+    """Установить FINAL_SWAP-фазу. Возвращает `final_table_case_id`.
 
-    Вызывается ПОСЛЕ того, как открыли последний кейс по расписанию (на
-    последнем раунде у схемы schedule[-1]==1, фактически открыт ровно один
-    предпоследний кейс, кроме личного). Личный кейс — единственный закрытый.
+    Общий внутренний помощник: используется и `finalize_banker` (нормальный
+    путь BANKER → FINAL_SWAP), и сохранённой публичной `transition_to_final_swap`
+    (для обратной совместимости с тестами / API).
+    """
+    if session.case_count is None or session.personal_case_id is None:
+        raise WrongPhase("case_count or personal_case_id not set")
+    candidates = [
+        c
+        for c in range(1, session.case_count + 1)
+        if c != session.personal_case_id and c not in session.opened
+    ]
+    if len(candidates) != 1:
+        raise WrongPhase(
+            f"expected exactly 1 case on the table for SWAP, got {len(candidates)}"
+        )
+    session.final_table_case_id = candidates[0]
+    session.swap_decisions = {}
+    session.phase = DealPhase.FINAL_SWAP
+    log.info(
+        "deal: chat=%d → FINAL_SWAP, personal=#%d table=#%d",
+        session.chat_id,
+        session.personal_case_id,
+        session.final_table_case_id,
+    )
+    return session.final_table_case_id
+
+
+def end_game_reveal(session: DealSession) -> None:
+    """Устаревший путь финала без SWAP. Сохранён только для обратной совместимости
+    тестов; новый поток зовёт `transition_to_final_swap` + `finalize_swap`.
+
+    Начисляет всем «active» игрокам значение личного кейса.
     """
     if session.phase is not DealPhase.OPENING:
         raise WrongPhase(f"end_game_reveal requires OPENING, got {session.phase}")
@@ -521,8 +627,104 @@ def end_game_reveal(session: DealSession) -> None:
             player.deal_round_idx = None
     session.phase = DealPhase.FINISHED
     log.info(
-        "deal: chat=%d finished; personal case #%d = %d ₽",
+        "deal: chat=%d finished (legacy reveal); personal case #%d = %d ₽",
         session.chat_id,
         session.personal_case_id,
         personal_value,
     )
+
+
+# ---------------------------------------------------------------------------
+# Финал: SWAP
+# ---------------------------------------------------------------------------
+
+
+def transition_to_final_swap(session: DealSession) -> int:
+    """Legacy-вход в FINAL_SWAP напрямую из OPENING.
+
+    После рефакторинга основной путь — через банкера последнего раунда
+    (см. `finalize_banker`), но эта функция сохранена для тестов и для
+    сценариев, которые могут обходить банкера.
+    """
+    if session.phase is not DealPhase.OPENING:
+        raise WrongPhase(f"transition_to_final_swap requires OPENING, got {session.phase}")
+    if not is_last_round(session):
+        raise WrongPhase("transition_to_final_swap called before the last round")
+    if not is_round_complete(session):
+        raise WrongPhase("last round is not complete yet")
+    return _enter_final_swap(session)
+
+
+def submit_swap_decision(
+    session: DealSession,
+    user_id: int,
+    choice: Literal["keep", "swap"],
+) -> DecisionResult:
+    if session.phase is not DealPhase.FINAL_SWAP:
+        return DecisionResult.WRONG_PHASE
+    player = session.players.get(user_id)
+    if player is None or player.status != "active":
+        return DecisionResult.NOT_ACTIVE
+    if user_id in session.swap_decisions:
+        return DecisionResult.ALREADY_DECIDED
+    session.swap_decisions[user_id] = choice
+    return DecisionResult.ACCEPTED
+
+
+def all_active_decided_swap(session: DealSession) -> bool:
+    """True, если все ещё-активные игроки приняли решение в FINAL_SWAP."""
+    if session.phase is not DealPhase.FINAL_SWAP:
+        return False
+    for uid, p in session.players.items():
+        if p.status == "active" and uid not in session.swap_decisions:
+            return False
+    return True
+
+
+def finalize_swap(session: DealSession) -> None:
+    """Применить решения FINAL_SWAP. Активные без решения трактуем как `keep`.
+
+    Каждому активному:
+      • keep (или дефолт по таймауту) → winnings=personal_value, swap_kept=True
+      • swap → winnings=table_value, swap_kept=False
+    Всем `status="won_final"`. Фаза → FINISHED.
+    """
+    if session.phase is not DealPhase.FINAL_SWAP:
+        raise WrongPhase(f"finalize_swap requires FINAL_SWAP, got {session.phase}")
+    if session.personal_case_id is None or session.final_table_case_id is None:
+        raise WrongPhase("personal_case_id and final_table_case_id must be set")
+    personal_value = session.case_values[session.personal_case_id]
+    table_value = session.case_values[session.final_table_case_id]
+    for uid, player in session.players.items():
+        if player.status != "active":
+            continue
+        choice = session.swap_decisions.get(uid, "keep")
+        if choice == "swap":
+            player.swap_kept = False
+            player.winnings = table_value
+        else:
+            player.swap_kept = True
+            player.winnings = personal_value
+        player.status = "won_final"
+        player.deal_round_idx = None
+    session.phase = DealPhase.FINISHED
+    log.info(
+        "deal: chat=%d FINAL_SWAP applied; personal=%d ₽ table=%d ₽",
+        session.chat_id,
+        personal_value,
+        table_value,
+    )
+
+
+def force_finalize_swap_on_timeout(session: DealSession) -> None:
+    """Срабатывает по таймеру авто-перехода, если не все активные решили.
+
+    Заполняет недостающие как `keep` (консервативный дефолт — игрок не теряет
+    личный кейс по молчанию) и зовёт `finalize_swap`. No-op вне FINAL_SWAP.
+    """
+    if session.phase is not DealPhase.FINAL_SWAP:
+        return
+    for uid, p in session.players.items():
+        if p.status == "active" and uid not in session.swap_decisions:
+            session.swap_decisions[uid] = "keep"
+    finalize_swap(session)

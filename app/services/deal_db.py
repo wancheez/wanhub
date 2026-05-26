@@ -12,6 +12,7 @@ permission, повреждение) `init_db` выставляет внутре�
 возвращает пустой список.
 """
 
+import json
 import logging
 import sqlite3
 from contextlib import suppress
@@ -68,15 +69,18 @@ _unavailable: bool = False
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS outcomes (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id       INTEGER NOT NULL,
-    user_id       INTEGER NOT NULL,
-    user_name     TEXT NOT NULL,
-    winnings      INTEGER NOT NULL,
-    dealt         INTEGER NOT NULL,
-    case_count    INTEGER NOT NULL,
-    round_idx     INTEGER,
-    finished_at   TEXT NOT NULL
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id        INTEGER NOT NULL,
+    user_id        INTEGER NOT NULL,
+    user_name      TEXT NOT NULL,
+    winnings       INTEGER NOT NULL,
+    dealt          INTEGER NOT NULL,
+    case_count     INTEGER NOT NULL,
+    round_idx      INTEGER,
+    finished_at    TEXT NOT NULL,
+    used_swap      INTEGER,
+    swap_kept      INTEGER,
+    offer_history  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_chat      ON outcomes(chat_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_chat_user ON outcomes(chat_id, user_id);
@@ -148,11 +152,32 @@ def _get_connection() -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         with conn:
             conn.executescript(_SCHEMA_SQL)
+            _migrate_outcomes(conn)
     except (sqlite3.Error, OSError) as e:
         _unavailable = True
         raise DealStatsDBUnavailable(f"не удалось открыть {DEAL_STATS_DB_PATH}: {e}") from e
     _conn = conn
     return conn
+
+
+def _migrate_outcomes(conn: sqlite3.Connection) -> None:
+    """Идемпотентно добавить новые колонки в `outcomes`, если БД старая.
+
+    SQLite не поддерживает `ALTER TABLE ADD COLUMN IF NOT EXISTS` до 3.35,
+    а на старых сборках Raspberry Pi версия может быть ниже. Поэтому читаем
+    `PRAGMA table_info` и добавляем только недостающее.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(outcomes)")}
+    additions = [
+        ("used_swap", "INTEGER"),
+        ("swap_kept", "INTEGER"),
+        ("offer_history", "TEXT"),
+    ]
+    for name, sql_type in additions:
+        if name in existing:
+            continue
+        conn.execute(f"ALTER TABLE outcomes ADD COLUMN {name} {sql_type}")
+        log.info("deal_db: migrated outcomes: added column %s %s", name, sql_type)
 
 
 def record_outcome(
@@ -164,8 +189,17 @@ def record_outcome(
     dealt: bool,
     case_count: int,
     round_idx: int | None,
+    used_swap: bool | None = None,
+    swap_kept: bool | None = None,
+    offer_history: list[int] | None = None,
 ) -> None:
-    """Записать исход одной партии для одного игрока. No-op при недоступности."""
+    """Записать исход одной партии для одного игрока. No-op при недоступности.
+
+    Новые kwargs (`used_swap`, `swap_kept`, `offer_history`) дописываются в
+    расширенные колонки (см. `_migrate_outcomes`). Все три nullable: NULL
+    означает «фича не применялась» (например, игрок взял Deal до FINAL_SWAP,
+    или партия из старого формата без истории оферов).
+    """
     global _unavailable
     if _unavailable:
         return
@@ -176,8 +210,8 @@ def record_outcome(
                 """
                 INSERT INTO outcomes
                   (chat_id, user_id, user_name, winnings, dealt, case_count,
-                   round_idx, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   round_idx, finished_at, used_swap, swap_kept, offer_history)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -188,15 +222,19 @@ def record_outcome(
                     int(case_count),
                     round_idx,
                     datetime.now(UTC).isoformat(),
+                    None if used_swap is None else (1 if used_swap else 0),
+                    None if swap_kept is None else (1 if swap_kept else 0),
+                    json.dumps(offer_history) if offer_history else None,
                 ),
             )
         log.info(
-            "deal_db: recorded chat=%d user=%d (%r) won=%d dealt=%s",
+            "deal_db: recorded chat=%d user=%d (%r) won=%d dealt=%s swap=%s",
             chat_id,
             user_id,
             user_name,
             winnings,
             dealt,
+            swap_kept,
         )
     except (sqlite3.Error, DealStatsDBUnavailable, OSError) as e:
         # Один сбой — глушим, статистика по конкретной партии теряется,
