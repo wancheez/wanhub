@@ -543,7 +543,8 @@ def _text_final_swap(session: deal.DealSession) -> str:
     if pending:
         lines.append("Ждём решение: " + ", ".join(escape(n) for n in pending))
     else:
-        lines.append(f"✅ Все решили. <b>⏭ Далее</b> — любой игрок {_AUTO_ADVANCE_HINT}.")
+        # В FINAL_SWAP нет авто-таймера: ждём ручной «⏭ Далее» от любого игрока.
+        lines.append("✅ Все решили. <b>⏭ Далее</b> — любой игрок партии.")
     lines.append("")
     lines.append(_value_sidebar(session))
     return "\n".join(lines)
@@ -742,10 +743,10 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
         if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
             await _bump_phase(message, session)
         elif finalize_res is deal.FinalizeResult.OK_FINAL_SWAP:
-            # Те, кто отказался от финального офера, голосуют за SWAP.
-            # Страховка от молчания — авто-таймер с force_finalize_swap_on_timeout.
+            # Те, кто отказался от финального офера, голосуют за SWAP. Без
+            # авто-таймера — обмен в финале слишком значимое решение, чтобы
+            # дефолтить за молчуна; ждём явный клик каждого активного.
             await _bump_phase(message, session)
-            _start_auto_advance(message, session)
         else:  # OK_FINISHED
             await _finalize_and_summarize(message, session)
         return True
@@ -780,12 +781,20 @@ async def _announce_dropouts(message: Message, just_dealt: list[tuple[str, int]]
 
 
 def _cancel_auto_advance(chat_id: int) -> None:
-    """Снять висящий таймер авто-перехода и LLM-таску голоса банкира."""
+    """Снять висящий таймер авто-перехода и LLM-таску голоса банкира.
+
+    Никогда не отменяем самих себя: `_finalize_and_summarize` зовёт этот метод
+    из той же таски, что запустил auto-advance (цепочка `_runner` → `_try_advance`
+    → `_finalize_and_summarize`). `task.cancel()` на текущей таске инжектит
+    `CancelledError` в следующий `await` и обрывает финализацию — игра застывает
+    в `FINISHED` без summary/DB/cancel_session.
+    """
+    current = asyncio.current_task()
     task = _auto_advance_tasks.pop(chat_id, None)
-    if task is not None and not task.done():
+    if task is not None and not task.done() and task is not current:
         task.cancel()
     voice = _voice_tasks.pop(chat_id, None)
-    if voice is not None and not voice.done():
+    if voice is not None and not voice.done() and voice is not current:
         voice.cancel()
 
 
@@ -797,9 +806,9 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
     готовности больше не выполняется (гонка) — просто перерисовываем UI,
     чтобы он отразил реальное состояние.
 
-    Особый случай — FINAL_SWAP: если по таймеру не все активные проголосовали,
-    добиваем недостающие как «keep» через `force_finalize_swap_on_timeout`,
-    иначе игра «зависнет» с молчащими игроками.
+    Используется в OPENING (раунд завершён) и BANKER (все решили). FINAL_SWAP
+    намеренно без таймера: финальный обмен слишком значимое решение, чтобы
+    выбирать дефолт за молчуна.
     """
     _cancel_auto_advance_only(session.chat_id)
     chat_id = session.chat_id
@@ -812,12 +821,6 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
         if deal.get_session(chat_id) is not session:
             return
         try:
-            if session.phase is deal.DealPhase.FINAL_SWAP and not deal.all_active_decided_swap(
-                session
-            ):
-                deal.force_finalize_swap_on_timeout(session)
-                await _finalize_and_summarize(message, session)
-                return
             advanced = await _try_advance(message, session)
             if not advanced:
                 # Условие готовности «уплыло» — рефрешим сообщение под актуальное.
@@ -836,9 +839,13 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
 def _cancel_auto_advance_only(chat_id: int) -> None:
     """Снять только таймер авто-перехода. LLM-таску голоса не трогаем —
     она независимая, у неё свой жизненный цикл (см. `_start_banker_voice`).
+
+    Та же защита от self-cancel, что и в `_cancel_auto_advance`: при цепочке
+    `_runner` → `_try_advance` → `_start_auto_advance` (FINAL_SWAP-перепланировка)
+    мы бы отменили самих себя.
     """
     task = _auto_advance_tasks.pop(chat_id, None)
-    if task is not None and not task.done():
+    if task is not None and not task.done() and task is not asyncio.current_task():
         task.cancel()
 
 
@@ -908,6 +915,11 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
             continue
         round_opens_info.append({"name": p.name, "values": sorted(vals, reverse=True)})
 
+    # Снимаем «снимок» истории до запуска LLM. Если за время запроса набежит
+    # новый раунд (маловероятно, но возможно при гонке), мы не подсунем себе
+    # же только что записанную реплику как «прошлую».
+    previous_lines = list(session.banker_line_history)
+
     async def _runner() -> None:
         try:
             line = await deal_banker_voice.banker_line(
@@ -921,6 +933,7 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
                 opened_top=opened_top,
                 players=players_info,
                 round_opens=round_opens_info,
+                previous_lines=previous_lines,
             )
         except asyncio.CancelledError:
             return
@@ -937,6 +950,13 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
         if session.current_message_id != target_message_id:
             return
         session.last_banker_line = line
+        # Кольцевой буфер длиной PREVIOUS_LINES_LIMIT: храним столько, сколько
+        # отправляем модели — больше держать незачем.
+        session.banker_line_history.append(line)
+        if len(session.banker_line_history) > deal_banker_voice.PREVIOUS_LINES_LIMIT:
+            session.banker_line_history = session.banker_line_history[
+                -deal_banker_voice.PREVIOUS_LINES_LIMIT :
+            ]
         text, kb = _render_payload(session)
         try:
             with _suppress_edit_noop():
@@ -1023,6 +1043,12 @@ async def _resurface_existing(message: Message, session: deal.DealSession) -> No
     плодили «Не все ещё решили»), гасим устаревший таймер авто-перехода (он
     указывал на старое сообщение) и публикуем свежее сообщение под текущую
     фазу. Дальше игрок сам жмёт «⏭ Далее»/кейс/Deal-кнопку на новом сообщении.
+
+    Особый случай — `FINISHED`. Если из-за бага финализация оборвалась на
+    середине (классика: self-cancel в `_cancel_auto_advance`), сессия осталась
+    «висеть» с `phase=FINISHED`, но без summary/DB/cancel_session. Простой
+    re-render отдаст ту же замороженную доску «🎰 Раскрываем итог…» и ничего
+    больше — игра застревает навсегда. Поэтому здесь доигрываем финал.
     """
     _cancel_auto_advance(session.chat_id)
     prev_msg_id = session.current_message_id
@@ -1042,6 +1068,21 @@ async def _resurface_existing(message: Message, session: deal.DealSession) -> No
                 session.chat_id,
                 prev_msg_id,
             )
+
+    if session.phase is deal.DealPhase.FINISHED:
+        log.warning(
+            "deal: chat=%d resurrect: recovering stuck FINISHED session", session.chat_id
+        )
+        # Отправляем замороженную доску как новое сообщение и сразу
+        # «доигрываем» финал на нём: edit_text внутри `_finalize_and_summarize`
+        # станет no-op (тот же текст — TelegramBadRequest подавлен), а дальше
+        # пойдёт drama replay → summary → DB → cancel_session.
+        text, kb = _render_payload(session)
+        sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
+        session.current_message_id = sent.message_id
+        await _finalize_and_summarize(sent, session)
+        return
+
     await _render(message, session, edit=False)
 
 
@@ -1468,8 +1509,8 @@ async def _handle_swap_choice(
 
     assert isinstance(cb.message, Message)
     await _render(cb.message, session, edit=True)
-    if deal.all_active_decided_swap(session):
-        _start_auto_advance(cb.message, session)
+    # В FINAL_SWAP авто-таймер не запускаем — финализация только по ручному
+    # «⏭ Далее». Любой игрок партии может нажать его, как только все решили.
     await cb.answer("🎒 Оставил личный" if choice == "keep" else "🔄 Поменял")
 
 
@@ -1600,41 +1641,50 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
     Драм-реплей: после «доска заморожена» пауза 2 сек, затем (если был SWAP)
     последовательно показываем личный и табличный кейсы с паузами; иначе —
     короткое «подводим итог». Только потом — финальный summary с медалями.
+
+    `try/finally` вокруг всего — гарантия, что `cancel_session` отработает даже
+    при неожиданном исключении (Telegram, CancelledError, баг). Без этого
+    сессия зависала в `FINISHED` и повторный `/deal` бесконечно перерисовывал
+    «🎰 Раскрываем итог…», не двигаясь дальше.
     """
     # На время реплея гасим внешние таймеры: LLM-таска не должна дописать
     # реплику банкира в уже-замороженное сообщение, а авто-таймер — повторить
     # переход. До записи в БД оба должны быть мертвы.
     _cancel_auto_advance(session.chat_id)
 
-    # Доска — последняя картина состояния, без клавиатуры.
-    with _suppress_edit_noop():
-        await message.edit_text(_text_finished_board(session), parse_mode="HTML", reply_markup=None)
-
-    await _drama_replay(message, session)
-
-    summary = _text_end_summary(session)
     try:
-        await message.answer(summary, parse_mode="HTML")
-    except TelegramAPIError:
-        log.exception("deal: failed to send end summary for chat=%d", session.chat_id)
+        # Доска — последняя картина состояния, без клавиатуры.
+        with _suppress_edit_noop():
+            await message.edit_text(
+                _text_finished_board(session), parse_mode="HTML", reply_markup=None
+            )
 
-    for p in session.players.values():
-        if p.status not in ("dealt", "won_final"):
-            # Игрок присоединился, но не сыграл (например, отмена) — пропускаем.
-            continue
-        deal_db.record_outcome(
-            chat_id=session.chat_id,
-            user_id=p.user_id,
-            user_name=p.name,
-            winnings=p.winnings,
-            dealt=(p.status == "dealt"),
-            case_count=session.case_count or 0,
-            round_idx=p.deal_round_idx,
-            used_swap=(p.swap_kept is not None),
-            swap_kept=p.swap_kept,
-            offer_history=list(session.offer_history) if session.offer_history else None,
-        )
-    deal.cancel_session(session.chat_id)
+        await _drama_replay(message, session)
+
+        summary = _text_end_summary(session)
+        try:
+            await message.answer(summary, parse_mode="HTML")
+        except TelegramAPIError:
+            log.exception("deal: failed to send end summary for chat=%d", session.chat_id)
+
+        for p in session.players.values():
+            if p.status not in ("dealt", "won_final"):
+                # Игрок присоединился, но не сыграл (например, отмена) — пропускаем.
+                continue
+            deal_db.record_outcome(
+                chat_id=session.chat_id,
+                user_id=p.user_id,
+                user_name=p.name,
+                winnings=p.winnings,
+                dealt=(p.status == "dealt"),
+                case_count=session.case_count or 0,
+                round_idx=p.deal_round_idx,
+                used_swap=(p.swap_kept is not None),
+                swap_kept=p.swap_kept,
+                offer_history=list(session.offer_history) if session.offer_history else None,
+            )
+    finally:
+        deal.cancel_session(session.chat_id)
 
 
 async def _drama_replay(message: Message, session: deal.DealSession) -> None:

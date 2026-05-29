@@ -35,7 +35,14 @@ BANKER_MAX_TOKENS = 200
 # start 3-4 сек. 3 сек обрезали значимую долю валидных ответов; 5 сек ловит
 # их и почти не влияет на UX — UI уже отрисован, фраза просто догоняет.
 BANKER_TIMEOUT_SEC = 5.0
-MAX_LINE_CHARS = 140  # промпт просит ≤90, но иногда модель чуть длиннее — не режем грубо.
+# Лимит на длину строки. Промпт просит ≤110, hard cap 140 даёт ~30 символов
+# запаса для случаев когда модель чуть переборщит — лучше обрезать с «…», чем
+# вернуть пустоту.
+MAX_LINE_CHARS = 140
+# Сколько последних реплик банкира передавать модели как `previous_lines` для
+# антиповтора. 3 — компромисс между «достаточно контекста чтобы заметить
+# дубликат» и «не раздуваем входящий промпт».
+PREVIOUS_LINES_LIMIT = 3
 
 _SYSTEM_PROMPT = load_prompt("deal_banker")
 
@@ -212,6 +219,7 @@ async def banker_line(
     opened_top: list[int] | tuple[int, ...] = (),
     players: list[dict[str, object]] | None = None,
     round_opens: list[dict[str, object]] | None = None,
+    previous_lines: list[str] | tuple[str, ...] = (),
 ) -> str:
     """Получить ОДНУ строку реплики банкира под текущий офер.
 
@@ -224,6 +232,11 @@ async def banker_line(
     использует их, чтобы при желании обратиться к игроку по имени; в статике
     они не задействованы (имя в шаблон подставлять рискованно — звучит
     шаблонно). Оба опциональны для обратной совместимости с тестами.
+
+    `previous_lines` — реплики банкира за прошлые раунды этой партии (в
+    хронологическом порядке, новейшая последней). Передаются модели для
+    антиповтора; обрезаются до `PREVIOUS_LINES_LIMIT` штук. Статика их не
+    использует — там за разнообразие отвечает `random.choice`.
     """
     category = categorize(
         offer=offer,
@@ -250,6 +263,7 @@ async def banker_line(
             "opened_top": list(opened_top),
             "players": players or [],
             "round_opens": round_opens or [],
+            "previous_lines": list(previous_lines)[-PREVIOUS_LINES_LIMIT:],
             "category": category,
         },
         ensure_ascii=False,

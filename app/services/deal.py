@@ -59,7 +59,6 @@ __all__ = [
     "end_game_reveal",
     "finalize_banker",
     "finalize_swap",
-    "force_finalize_swap_on_timeout",
     "get_session",
     "is_last_round",
     "is_round_complete",
@@ -226,6 +225,11 @@ class DealSession:
     # Чтобы повторные рендеры (на каждое Deal/No Deal) не дёргали LLM заново.
     # Сбрасывается в `transition_to_banker` (новая фаза — новая реплика).
     last_banker_line: str | None = None
+    # Кольцевой буфер последних реплик банкира за всю партию — передаётся в LLM
+    # как `previous_lines`, чтобы модель не дублировала конструкции между
+    # раундами. Без буфера каждый запрос независимый и партии получаются
+    # однообразные («Я предложил. Ваш ход.» × 6).
+    banker_line_history: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     # message_id последнего активного сообщения партии (то, на котором сейчас
     # «живая» клавиатура). Обновляется хендлером после каждой отрисовки. Нужно
@@ -713,15 +717,3 @@ def finalize_swap(session: DealSession) -> None:
     )
 
 
-def force_finalize_swap_on_timeout(session: DealSession) -> None:
-    """Срабатывает по таймеру авто-перехода, если не все активные решили.
-
-    Заполняет недостающие как `keep` (консервативный дефолт — игрок не теряет
-    личный кейс по молчанию) и зовёт `finalize_swap`. No-op вне FINAL_SWAP.
-    """
-    if session.phase is not DealPhase.FINAL_SWAP:
-        return
-    for uid, p in session.players.items():
-        if p.status == "active" and uid not in session.swap_decisions:
-            session.swap_decisions[uid] = "keep"
-    finalize_swap(session)

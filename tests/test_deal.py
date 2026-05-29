@@ -475,18 +475,6 @@ def test_all_active_decided_swap() -> None:
     assert deal.all_active_decided_swap(s) is True
 
 
-def test_force_finalize_swap_on_timeout_defaults_to_keep() -> None:
-    """Молчуны по таймауту получают `keep` — не теряют личный кейс по умолчанию."""
-    s, _ = _run_to_final_swap(personal=5)
-    personal_val = s.case_values[5]
-    # Только один из двух голосует.
-    deal.submit_swap_decision(s, 100, "swap")
-    deal.force_finalize_swap_on_timeout(s)
-    assert s.phase is deal.DealPhase.FINISHED
-    assert s.players[200].swap_kept is True  # молчун → keep
-    assert s.players[200].winnings == personal_val
-
-
 def test_final_swap_skipped_when_all_dealt() -> None:
     """Если оба берут Deal в первом банкер-раунде — FINAL_SWAP не входим, сразу FINISHED."""
     s = _ready_game(personal=10)
