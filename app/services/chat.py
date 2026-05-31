@@ -42,7 +42,7 @@ def _system_prompt(
     """
     username = TELEGRAM_BOT_USERNAME or "wanbot"  # bare, no @ — prompt adds it where needed
     label = _CHAT_TYPE_LABEL.get(chat_type, chat_type)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%a, локальное время Pi)")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M (%a, локальное время сервера)")
     return (
         _PROMPT_TEMPLATE.replace("{model}", CHAT_MODEL)
         .replace("{bot_username}", username)

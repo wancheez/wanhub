@@ -21,17 +21,28 @@ def _format_uptime(seconds: float) -> str:
 @router.message(Command("device"))
 async def cmd_device(message: Message) -> None:
     info = await asyncio.to_thread(get_device_info)
-    cpu_temp = f"{info.cpu_temp_c} °C" if info.cpu_temp_c is not None else "—"
-    cpu_freq = f"{info.cpu_freq_mhz} МГц" if info.cpu_freq_mhz is not None else "—"
+
+    # CPU-блок: модель/температура/частота показываем только если данные есть
+    # (на облачных VM сенсоров и cpufreq может не быть — тогда строки опускаем).
+    cpu_lines = [f"  ядер: {info.cpu_count}"]
+    if info.cpu_model:
+        cpu_lines.append(f"  модель: {escape(info.cpu_model)}")
+    if info.cpu_temp_c is not None:
+        cpu_lines.append(f"  температура: {info.cpu_temp_c} °C")
+    if info.cpu_freq_mhz is not None:
+        cpu_lines.append(f"  частота: {info.cpu_freq_mhz} МГц")
+    cpu_lines.append(
+        f"  load avg: {info.load_avg_1} / {info.load_avg_5} / {info.load_avg_15}"
+    )
+    cpu_block = "\n".join(cpu_lines)
+
     text = (
         f"<b>{escape(info.model)}</b>\n"
         f"hostname: <code>{escape(info.hostname)}</code>\n"
+        f"ядро: <code>{escape(info.kernel)}</code>\n"
         f"uptime: {_format_uptime(info.uptime_seconds)}\n\n"
         f"<b>CPU</b>\n"
-        f"  ядер: {info.cpu_count}\n"
-        f"  температура: {cpu_temp}\n"
-        f"  частота: {cpu_freq}\n"
-        f"  load avg: {info.load_avg_1} / {info.load_avg_5} / {info.load_avg_15}\n\n"
+        f"{cpu_block}\n\n"
         f"<b>Память</b>\n"
         f"  {info.memory_used_mb} / {info.memory_total_mb} МБ "
         f"({info.memory_used_percent}%)\n\n"

@@ -7,6 +7,7 @@ class DeviceInfo(BaseModel):
     kernel: str
     uptime_seconds: float
     cpu_count: int
+    cpu_model: str | None
     cpu_temp_c: float | None
     cpu_freq_mhz: float | None
     load_avg_1: float

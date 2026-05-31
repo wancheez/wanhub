@@ -1,3 +1,4 @@
+import glob
 import os
 import shutil
 import socket
@@ -13,18 +14,59 @@ def _read_text(path: str) -> str | None:
         return None
 
 
+def _cpuinfo_field(field: str) -> str | None:
+    """Первое значение поля из /proc/cpuinfo (напр. 'model name', 'cpu MHz')."""
+    for line in (_read_text("/proc/cpuinfo") or "").splitlines():
+        key, sep, val = line.partition(":")
+        if sep and key.strip() == field:
+            return val.strip()
+    return None
+
+
 def _cpu_temp_c() -> float | None:
-    raw = _read_text("/sys/class/thermal/thermal_zone0/temp")
-    return round(int(raw) / 1000, 1) if raw else None
+    # Pi отдаёт thermal_zone0; на x86 термодатчики живут в hwmon (coretemp/
+    # k10temp). На облачных VM сенсоров часто нет вовсе → None (это нормально).
+    candidates = sorted(glob.glob("/sys/class/thermal/thermal_zone*/temp"))
+    candidates += sorted(glob.glob("/sys/class/hwmon/hwmon*/temp1_input"))
+    for path in candidates:
+        raw = _read_text(path)
+        if raw:
+            try:
+                return round(int(raw) / 1000, 1)
+            except ValueError:
+                continue
+    return None
 
 
 def _cpu_freq_mhz() -> float | None:
+    # cpufreq-говернор (Pi и bare-metal). В гостевой VM его обычно нет —
+    # тогда берём текущую частоту из /proc/cpuinfo.
     raw = _read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
-    return round(int(raw) / 1000, 1) if raw else None
+    if raw:
+        return round(int(raw) / 1000, 1)
+    mhz = _cpuinfo_field("cpu MHz")
+    if mhz:
+        try:
+            return round(float(mhz), 1)
+        except ValueError:
+            return None
+    return None
 
 
 def _model() -> str:
-    return _read_text("/proc/device-tree/model") or "unknown"
+    # ARM/SBC (Raspberry Pi и т.п.) — device tree.
+    dt = _read_text("/proc/device-tree/model")
+    if dt:
+        return dt
+    # x86 / облачные VM — DMI (SMBIOS): «Google Compute Engine»,
+    # «QEMU Standard PC» и т.п.
+    vendor = _read_text("/sys/class/dmi/id/sys_vendor")
+    product = _read_text("/sys/class/dmi/id/product_name")
+    dmi = " ".join(p for p in (vendor, product) if p).strip()
+    if dmi:
+        return dmi
+    # Последний фоллбэк — модель CPU, затем архитектура ядра.
+    return _cpuinfo_field("model name") or os.uname().machine or "unknown"
 
 
 def _uptime_seconds() -> float:
@@ -63,6 +105,7 @@ def get_device_info() -> DeviceInfo:
         kernel=os.uname().release,
         uptime_seconds=round(_uptime_seconds(), 1),
         cpu_count=os.cpu_count() or 0,
+        cpu_model=_cpuinfo_field("model name"),
         cpu_temp_c=_cpu_temp_c(),
         cpu_freq_mhz=_cpu_freq_mhz(),
         load_avg_1=round(load_1, 2),
