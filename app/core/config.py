@@ -11,6 +11,23 @@ LOG_DIR = PROJECT_ROOT / "logs"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 
+def _parse_bool(raw: str, *, default: bool) -> bool:
+    raw = raw.strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+# Тумблеры компонентов. Управляются из .env, оба по умолчанию включены.
+# ENABLE_WEB  — поднимать ли FastAPI/uvicorn (веб-морда + API).
+# ENABLE_BOT  — поднимать ли Telegram-бота (long-polling).
+# Их читает единый entrypoint `python -m app` (см. app/__main__.py); ENABLE_BOT
+# дополнительно учитывается в lifespan веб-приложения. Бот в любом случае не
+# стартует без TELEGRAM_BOT_TOKEN.
+ENABLE_WEB: bool = _parse_bool(os.getenv("ENABLE_WEB", ""), default=True)
+ENABLE_BOT: bool = _parse_bool(os.getenv("ENABLE_BOT", ""), default=True)
+
+
 def _parse_int(raw: str) -> int | None:
     raw = raw.strip()
     if not raw:

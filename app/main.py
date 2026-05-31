@@ -12,7 +12,13 @@ load_dotenv()
 
 from app.api.routes import ascii, auth, chat, device, health, pages, telemt  # noqa: E402
 from app.bot.main import start_bot, stop_bot  # noqa: E402
-from app.core.config import APP_TITLE, APP_VERSION, STATIC_DIR, WEB_SESSION_SECRET  # noqa: E402
+from app.core.config import (  # noqa: E402
+    APP_TITLE,
+    APP_VERSION,
+    ENABLE_BOT,
+    STATIC_DIR,
+    WEB_SESSION_SECRET,
+)
 from app.core.logging import setup_logging  # noqa: E402
 from app.services.web_users import generate_session_secret  # noqa: E402
 
@@ -21,11 +27,14 @@ log = logging.getLogger("app")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await start_bot()
+    # Бота поднимаем вместе с веб-процессом только если он включён тумблером.
+    if ENABLE_BOT:
+        await start_bot()
     try:
         yield
     finally:
-        await stop_bot()
+        if ENABLE_BOT:
+            await stop_bot()
 
 
 def create_app() -> FastAPI:

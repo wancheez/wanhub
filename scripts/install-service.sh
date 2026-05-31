@@ -48,11 +48,11 @@ if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
 fi
 ok ".env present"
 
-if [[ ! -x "$PROJECT_ROOT/.venv/bin/uvicorn" ]]; then
-    fail ".venv/bin/uvicorn missing — run 'make install' first"
+if [[ ! -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+    fail ".venv/bin/python missing — run 'make install' first"
     exit 1
 fi
-ok ".venv/bin/uvicorn present"
+ok ".venv/bin/python present"
 
 # Render template — substitute __USER__ and __PROJECT_DIR__.
 RENDERED=$(mktemp)

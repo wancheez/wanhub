@@ -10,7 +10,8 @@ Group=__USER__
 WorkingDirectory=__PROJECT_DIR__
 EnvironmentFile=__PROJECT_DIR__/.env
 
-ExecStart=__PROJECT_DIR__/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Единый entrypoint — какие модули поднять, решают ENABLE_WEB/ENABLE_BOT в .env.
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app
 
 # Restart policy — graceful crash recovery
 Restart=on-failure
