@@ -707,10 +707,10 @@ def _text_end_summary(session: deal.DealSession) -> str:
         wif = _what_if_line(session, p)
         if wif is not None:
             lines.append(wif)
-    # Кликабельная команда в plain-тексте: Telegram сам подсветит /deal как
-    # быстрый запуск — без лишних кнопок.
+    # Кликабельные команды в plain-тексте: Telegram сам подсветит /deal и
+    # /dealtop как быстрый запуск — без лишних кнопок.
     lines.append("")
-    lines.append("🎲 Ещё партию — /deal")
+    lines.append("🎲 Ещё партию — /deal · 🏆 топ недели — /dealtop")
     return "\n".join(lines)
 
 

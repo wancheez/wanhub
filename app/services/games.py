@@ -823,10 +823,33 @@ def compute_scores(game: Game) -> list[tuple[str, int, int]]:
     return rows
 
 
+# Команда перезапуска по виду игры — выводится в подвале финального табло,
+# чтобы из итогов сразу начать новую партию одним тапом (Telegram сам делает
+# /команды кликабельными в plain-тексте). У этих викторин нет персистентного
+# рейтинга, поэтому строки «топ» здесь нет — только перезапуск.
+_RESTART_COMMAND: dict[GameKind, str] = {
+    GameKind.FLAG: "/flags",
+    GameKind.CAPITAL: "/capitals",
+    GameKind.LLM_QUIZ: "/quiz",
+    GameKind.MOVIE: "/movie",
+    GameKind.SHOW: "/show",
+    GameKind.RIDDLE: "/riddles",
+    GameKind.ALIAS: "/alias",
+}
+
+
+def _restart_footer(game: Game) -> str:
+    cmd = _RESTART_COMMAND.get(game.kind)
+    return f"\n\n🎲 Ещё партию — {cmd}" if cmd else ""
+
+
 def format_scoreboard(game: Game) -> str:
     rows = compute_scores(game)
     if not rows:
-        return "<b>Игра окончена.</b>\nНикто не ответил ни на один вопрос."
+        return (
+            "<b>Игра окончена.</b>\nНикто не ответил ни на один вопрос."
+            + _restart_footer(game)
+        )
 
     lines = [f"<b>🏁 Итог ({game.total} вопросов)</b>"]
     medals = ["🥇", "🥈", "🥉"]
@@ -841,7 +864,7 @@ def format_scoreboard(game: Game) -> str:
             prev_score = score
         prefix = medals[rank] if rank < len(medals) else "  "
         lines.append(f"{prefix} <b>{escape(name)}</b> — {score}/{answered}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _restart_footer(game)
 
 
 def _pick_distractors[T](
