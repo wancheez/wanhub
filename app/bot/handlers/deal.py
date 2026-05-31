@@ -19,7 +19,13 @@ from datetime import UTC, datetime
 from html import escape
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -94,6 +100,38 @@ _voice_tasks: dict[int, asyncio.Task[None]] = {}
 # Длительность пауз драм-реплея в финале. 2 сек — узнаваемо «ТВ»-ритмично,
 # но не так долго, чтобы зритель в чате терял нить.
 _DRAMA_PAUSE_SECONDS = 2.0
+
+# Ретрай транзиентных сбоев Telegram. На Pi с домашним аплинком и в групповом
+# чате, куда игра шлёт сообщения пачками (анонс выбывших + bump + реплика
+# банкира подряд), регулярно ловится флуд-контроль 429, сетевой блип или 5xx.
+# Без ретрая такой сбой ровно посередине перехода фазы оставлял игру без кнопок
+# и без нового сообщения — приходилось вручную возобновлять сессию через /deal.
+_SEND_RETRIES = 3
+
+
+async def _with_retry(coro_factory, *, what: str):
+    """Выполнить Telegram-операцию с ретраем на транзиентных сбоях.
+
+    `coro_factory` — фабрика корутины (вызывается заново на каждую попытку:
+    корутину нельзя await-нуть дважды). На 429 ждём ровно столько, сколько
+    просит Telegram; на сетевых/5xx — короткий нарастающий бэкофф. После
+    исчерпания попыток пробрасываем последнее исключение, чтобы вызывающий
+    залогировал и (где возможно) откатился на старую клавиатуру.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_SEND_RETRIES):
+        try:
+            return await coro_factory()
+        except TelegramRetryAfter as e:
+            last_exc = e
+            log.info("deal: %s flood-control, retry after %ss", what, e.retry_after)
+            await asyncio.sleep(e.retry_after + 0.5)
+        except (TelegramNetworkError, TelegramServerError) as e:
+            last_exc = e
+            log.info("deal: %s transient error (%s), retry", what, type(e).__name__)
+            await asyncio.sleep(0.5 * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _grid_sizes(button_count: int, width: int) -> tuple[int, ...]:
@@ -690,10 +728,16 @@ async def _render(message: Message, session: deal.DealSession, *, edit: bool) ->
     text, kb = _render_payload(session)
     if edit:
         with _suppress_edit_noop():
-            await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            await _with_retry(
+                lambda: message.edit_text(text, parse_mode="HTML", reply_markup=kb),
+                what="edit_text",
+            )
         session.current_message_id = message.message_id
         return
-    sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    sent = await _with_retry(
+        lambda: message.answer(text, parse_mode="HTML", reply_markup=kb),
+        what="answer",
+    )
     session.current_message_id = sent.message_id
 
 
@@ -704,10 +748,22 @@ async def _bump_phase(prev_message: Message, session: deal.DealSession) -> None:
     в групповом чате активное сообщение должно быть внизу — иначе кнопки тонут
     в постороннем разговоре. Внутри фазы (последовательные открытия, голоса
     Deal/No Deal) продолжаем edit-ить, чтобы не спамить.
+
+    Порядок важен: СНАЧАЛА публикуем свежее сообщение, ПОТОМ снимаем старую
+    клавиатуру. Фаза в сессии к этому моменту уже переключена, и если отправка
+    сорвётся (флуд-контроль/сеть/5xx даже после ретраев), у игры обязана
+    остаться кликабельная клавиатура на старом сообщении — иначе получаем
+    «кнопки пропали, нового сообщения нет» и приходится вручную возобновлять.
+    Клик по уцелевшей кнопке проходит через guard'ы в `on_next` и сам
+    перерисовывает UI под актуальную фазу. Снятие старой клавиатуры —
+    косметика; делаем после и глушим любые ошибки.
     """
-    with _suppress_edit_noop():
-        await prev_message.edit_reply_markup(reply_markup=None)
     await _render(prev_message, session, edit=False)
+    try:
+        with _suppress_edit_noop():
+            await prev_message.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError:
+        log.info("deal: chat=%d bump: stale kb strip failed (ignored)", session.chat_id)
 
 
 async def _try_advance(message: Message, session: deal.DealSession) -> bool:
@@ -1070,9 +1126,7 @@ async def _resurface_existing(message: Message, session: deal.DealSession) -> No
             )
 
     if session.phase is deal.DealPhase.FINISHED:
-        log.warning(
-            "deal: chat=%d resurrect: recovering stuck FINISHED session", session.chat_id
-        )
+        log.warning("deal: chat=%d resurrect: recovering stuck FINISHED session", session.chat_id)
         # Отправляем замороженную доску как новое сообщение и сразу
         # «доигрываем» финал на нём: edit_text внутри `_finalize_and_summarize`
         # станет no-op (тот же текст — TelegramBadRequest подавлен), а дальше
@@ -1574,7 +1628,15 @@ async def on_next(cb: CallbackQuery) -> None:
         await cb.answer("Не все ещё решили.")
         return
 
-    advanced = await _try_advance(cb.message, session)
+    try:
+        advanced = await _try_advance(cb.message, session)
+    except TelegramAPIError:
+        # Ретраи в `_render`/`_bump_phase` исчерпаны. Фаза могла уже
+        # переключиться, но старая клавиатура цела (см. `_bump_phase`) —
+        # просим повторить клик, он перерисует UI под актуальную фазу.
+        log.exception("deal: chat=%d on_next advance failed", session.chat_id)
+        await cb.answer("Telegram подвис, нажми ⏭ ещё раз.", show_alert=False)
+        return
     if not advanced:
         await cb.answer("Сейчас «Далее» не нужно.")
         return

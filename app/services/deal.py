@@ -715,5 +715,3 @@ def finalize_swap(session: DealSession) -> None:
         personal_value,
         table_value,
     )
-
-

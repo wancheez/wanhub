@@ -39,8 +39,7 @@ def main() -> None:
     else:
         setup_logging()
         log.error(
-            "Нечего запускать: ENABLE_WEB и ENABLE_BOT оба выключены в .env. "
-            "Включи хотя бы один."
+            "Нечего запускать: ENABLE_WEB и ENABLE_BOT оба выключены в .env. Включи хотя бы один."
         )
         raise SystemExit(1)
 

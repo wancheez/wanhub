@@ -31,9 +31,7 @@ async def cmd_device(message: Message) -> None:
         cpu_lines.append(f"  температура: {info.cpu_temp_c} °C")
     if info.cpu_freq_mhz is not None:
         cpu_lines.append(f"  частота: {info.cpu_freq_mhz} МГц")
-    cpu_lines.append(
-        f"  load avg: {info.load_avg_1} / {info.load_avg_5} / {info.load_avg_15}"
-    )
+    cpu_lines.append(f"  load avg: {info.load_avg_1} / {info.load_avg_5} / {info.load_avg_15}")
     cpu_block = "\n".join(cpu_lines)
 
     text = (
