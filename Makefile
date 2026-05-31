@@ -15,6 +15,7 @@ MIN_VA ?= 6
 
 .PHONY: help install update lock run dev test coverage clean \
         service-install service-uninstall service-restart service-status service-logs \
+        backup backup-dry backup-restore backup-install backup-uninstall backup-status backup-logs \
         lint format typecheck check fix \
         fetch-movies fetch-shows fetch-movies-known fetch-shows-known fetch-all
 
@@ -42,6 +43,15 @@ help:
 	@echo "  service-restart    - sudo systemctl restart wanhub"
 	@echo "  service-status     - systemctl status wanhub"
 	@echo "  service-logs       - tail journal logs (Ctrl-C to exit)"
+	@echo ""
+	@echo "Backups (живые SQLite-базы → WebDAV, конфиг WEBDAV_* в .env):"
+	@echo "  backup             - снять снапшот и залить на WebDAV прямо сейчас"
+	@echo "  backup-dry         - снапшот + архив локально, без заливки (DRY_RUN)"
+	@echo "  backup-restore     - скачать последний бекап и разложить (ошибка, если файлы есть)"
+	@echo "  backup-install     - install/enable/start ежедневный таймер (sudo)"
+	@echo "  backup-uninstall   - снести таймер + unit (sudo)"
+	@echo "  backup-status      - расписание таймера (systemctl list-timers)"
+	@echo "  backup-logs        - логи последнего прогона бекапа"
 	@echo ""
 	@echo "Quiz data ingestion (TMDB → data/{movies,shows}.sqlite3):"
 	@echo "  fetch-movies         - top_rated фильмы (классика по оценке)"
@@ -106,6 +116,27 @@ service-status:
 
 service-logs:
 	journalctl -u wanhub -f -n 50
+
+backup:
+	@./scripts/backup-db.sh
+
+backup-dry:
+	@DRY_RUN=1 ./scripts/backup-db.sh
+
+backup-restore:
+	@./scripts/restore-db.sh
+
+backup-install:
+	@./scripts/install-backup-timer.sh
+
+backup-uninstall:
+	@./scripts/install-backup-timer.sh --uninstall
+
+backup-status:
+	systemctl list-timers wanhub-backup --no-pager
+
+backup-logs:
+	journalctl -u wanhub-backup -n 50 --no-pager
 
 fetch-movies:
 	$(POETRY) run python scripts/fetch_movies.py --kind movie \

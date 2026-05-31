@@ -1,0 +1,16 @@
+[Unit]
+Description=wanhub — ежедневный бекап SQLite-баз на WebDAV
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__PROJECT_DIR__/.env
+ExecStart=__PROJECT_DIR__/scripts/backup-db.sh
+
+# Логи в journald: journalctl -u wanhub-backup -n 50
+StandardOutput=journal
+StandardError=journal

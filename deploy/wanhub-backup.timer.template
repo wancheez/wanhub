@@ -1,0 +1,12 @@
+[Unit]
+Description=wanhub — таймер ежедневного бекапа баз
+
+[Timer]
+# Каждый день в 04:00 по локальному времени. Persistent=true догоняет
+# пропущенный запуск, если машина в это время была выключена.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
