@@ -258,20 +258,27 @@ def _fmt_rub(v: int) -> str:
 
 
 def _fmt_rub_short(v: int) -> str:
-    if v >= 1_000_000:
-        return f"{v // 1_000_000}М ₽"
-    if v >= 1_000:
-        return f"{v // 1_000}к ₽"
-    return f"{v} ₽"
+    return _fmt_rub_compact(v) + " ₽"
 
 
 def _fmt_rub_compact(v: int) -> str:
-    """Как `_fmt_rub_short`, но без хвостового « ₽» — для перечислений."""
+    """Короткий формат без хвостового « ₽»: 3М, 1.3М, 500к, 100.
+
+    Остаток не отбрасываем: офер банкира выше миллиона кратен 100к (см.
+    `_round_clean` в `app.services.deal`), а в диапазоне тысяч — кратен 500,
+    поэтому одного знака после запятой хватает, чтобы не потерять сумму.
+    Иначе 1 300 000 ₽ показывалось как «1М».
+    """
     if v >= 1_000_000:
-        return f"{v // 1_000_000}М"
+        return _fmt_trim(v / 1_000_000) + "М"
     if v >= 1_000:
-        return f"{v // 1_000}к"
+        return _fmt_trim(v / 1_000) + "к"
     return str(v)
+
+
+def _fmt_trim(q: float) -> str:
+    """Один знак после запятой без хвостового «.0»: 3.0 → «3», 1.3 → «1.3»."""
+    return f"{q:.1f}".rstrip("0").rstrip(".")
 
 
 def _player_name(session: deal.DealSession, user_id: int) -> str:
