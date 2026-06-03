@@ -846,10 +846,7 @@ def _restart_footer(game: Game) -> str:
 def format_scoreboard(game: Game) -> str:
     rows = compute_scores(game)
     if not rows:
-        return (
-            "<b>Игра окончена.</b>\nНикто не ответил ни на один вопрос."
-            + _restart_footer(game)
-        )
+        return "<b>Игра окончена.</b>\nНикто не ответил ни на один вопрос." + _restart_footer(game)
 
     lines = [f"<b>🏁 Итог ({game.total} вопросов)</b>"]
     medals = ["🥇", "🥈", "🥉"]

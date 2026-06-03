@@ -627,9 +627,7 @@ def test_generate_match_basic():
 
 
 def test_generate_match_generate_verb():
-    assert extract_generate_intent("сгенерируй закат над морем") == {
-        "prompt": "закат над морем"
-    }
+    assert extract_generate_intent("сгенерируй закат над морем") == {"prompt": "закат над морем"}
 
 
 def test_generate_match_with_pronoun():
