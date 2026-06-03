@@ -2,11 +2,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app.bot.skills.base import Skill
+from app.bot.skills.generate_image import GenerateImageSkill
 from app.bot.skills.send_image import SendImageSkill
 from app.bot.skills.show_dealtop import ShowDealTopSkill
 from app.bot.skills.start_game import StartGameSkill
 
-SKILLS: list[Skill] = [StartGameSkill(), ShowDealTopSkill(), SendImageSkill()]
+SKILLS: list[Skill] = [
+    StartGameSkill(),
+    ShowDealTopSkill(),
+    GenerateImageSkill(),
+    SendImageSkill(),
+]
 
 
 async def try_skills(message: Message, text: str, state: FSMContext) -> bool:

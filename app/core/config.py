@@ -58,6 +58,11 @@ WEB_SESSION_SECRET: str = os.getenv("WEB_SESSION_SECRET", "").strip()
 # /telemt and /api/telemt return 503, bot /telemt replies with a hint.
 TELEMT_METRICS_URL: str = os.getenv("TELEMT_METRICS_URL", "").strip()
 
+# Google Gemini API key (aistudio.google.com). Нужен ТОЛЬКО для генерации
+# картинок моделью gemini-3.1-flash-image (Nano Banana) — скилл «нарисуй …».
+# Пусто → скилл генерации отвечает понятной ошибкой, остальное работает.
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
+
 DEFAULT_QUIZ_QUESTIONS = 5
 MAX_QUIZ_QUESTIONS = 30
 

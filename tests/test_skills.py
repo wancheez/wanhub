@@ -1,3 +1,4 @@
+from app.bot.skills.generate_image import GenerateImageSkill, extract_generate_intent
 from app.bot.skills.send_image import SendImageSkill
 from app.bot.skills.show_dealtop import ShowDealTopSkill, extract_dealtop_intent
 from app.bot.skills.start_game import StartGameSkill, extract_game_intent
@@ -616,3 +617,58 @@ def test_dealtop_no_match_general_question():
 def test_dealtop_skill_match():
     s = ShowDealTopSkill()
     assert s.match("покажи рейтинг сделки") == {}
+
+
+# ----- GenerateImageSkill -----
+
+
+def test_generate_match_basic():
+    assert extract_generate_intent("нарисуй кота") == {"prompt": "кота"}
+
+
+def test_generate_match_generate_verb():
+    assert extract_generate_intent("сгенерируй закат над морем") == {
+        "prompt": "закат над морем"
+    }
+
+
+def test_generate_match_with_pronoun():
+    assert extract_generate_intent("придумай мне логотип") == {"prompt": "логотип"}
+
+
+def test_generate_match_capitalized():
+    r = extract_generate_intent("Нарисуй рыжего кота в шляпе")
+    assert r == {"prompt": "рыжего кота в шляпе"}
+
+
+def test_generate_match_trailing_punctuation():
+    assert extract_generate_intent("нарисуй дракона!") == {"prompt": "дракона"}
+
+
+def test_generate_match_short_generate_verb():
+    assert extract_generate_intent("сгенери пейзаж") == {"prompt": "пейзаж"}
+
+
+def test_generate_no_match_search_verb():
+    # Глаголы поиска принадлежат send_image — генерация их НЕ ловит.
+    assert extract_generate_intent("покажи фото кота") is None
+    assert extract_generate_intent("пришли картинку дракона") is None
+
+
+def test_generate_no_match_greeting():
+    assert extract_generate_intent("привет") is None
+
+
+def test_generate_no_match_bare_verb():
+    # Глагол есть, предмета нет.
+    assert extract_generate_intent("нарисуй") is None
+
+
+def test_generate_skill_match_returns_dict():
+    s = GenerateImageSkill()
+    assert s.match("нарисуй кота") == {"prompt": "кота"}
+
+
+def test_generate_skill_no_match_returns_none():
+    s = GenerateImageSkill()
+    assert s.match("расскажи про котов") is None
