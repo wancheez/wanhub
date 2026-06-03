@@ -7,12 +7,19 @@
 Каждый игрок отвечает на вопрос один раз; «⏭ Далее» нажимает кто угодно.
 """
 
+import asyncio
 import logging
 from contextlib import suppress
 from html import escape
 
-from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram import Bot, F, Router
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
@@ -39,6 +46,110 @@ _CMD_NAMES: dict[games.GameKind, str] = {
     games.GameKind.LLM_QUIZ: "/quiz",
 }
 
+# Коалесинг обновлений подписи вопроса. Апдейты aiogram обрабатываются
+# параллельными тасками (handle_as_tasks=True, без лимита), поэтому когда
+# несколько игроков отвечают одновременно, каждый ответ правил бы один и тот
+# же message через edit_caption/edit_text. Telegram быстро упирается во
+# флуд-контроль одного сообщения: правки уходят в ретраи, а `cb.answer`
+# (гасящий спиннер) ждёт за ними — кнопка «зависает». Поэтому ответ теперь
+# сразу гасит спиннер, а перерисовку «Ответили: …» откладывает: одна таска на
+# чат с маленькой задержкой схлопывает пачку ответов в одну правку. Таска
+# читает АКТУАЛЬНЫЙ стейт в момент срабатывания, `dirty`-флаг гарантирует ещё
+# проход, если ответ пришёл уже во время правки.
+_REFRESH_DEBOUNCE_SECONDS = 0.25
+_REFRESH_RETRIES = 3
+_refresh_tasks: dict[int, asyncio.Task[None]] = {}
+_refresh_dirty: dict[int, bool] = {}
+
+
+def _schedule_refresh(bot: Bot, chat_id: int) -> None:
+    """Отметить подпись текущего вопроса «грязной» и (если ещё нет) запустить
+    отложенный коалес-рефреш на этот чат.
+    """
+    _refresh_dirty[chat_id] = True
+    existing = _refresh_tasks.get(chat_id)
+    if existing is not None and not existing.done():
+        return
+    _refresh_tasks[chat_id] = asyncio.create_task(_coalesced_refresh_runner(bot, chat_id))
+
+
+async def _coalesced_refresh_runner(bot: Bot, chat_id: int) -> None:
+    try:
+        while True:
+            try:
+                await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS)
+            except asyncio.CancelledError:
+                return
+            _refresh_dirty[chat_id] = False
+            game = games.get_game(chat_id)
+            if game is None or game.is_finished or game.active_message_id is None:
+                if not _refresh_dirty.get(chat_id):
+                    return
+                continue
+            await _edit_question_caption(bot, game)
+            if not _refresh_dirty.get(chat_id):
+                return
+    finally:
+        if _refresh_tasks.get(chat_id) is asyncio.current_task():
+            _refresh_tasks.pop(chat_id, None)
+
+
+async def _edit_question_caption(bot: Bot, game: games.Game) -> None:
+    """Перерисовать подпись текущего вопроса (список ответивших) на активном
+    сообщении. Флуд-контроль ретраим, «not modified» глушим, остальные ошибки
+    логируем и не роняем фоновую таску.
+    """
+    q = game.current_question()
+    mid = game.active_message_id
+    if q is None or mid is None:
+        return
+    chat_id = game.chat_id
+    answered = games.answered_names(game, game.current_idx)
+    text = _question_text(game, answered)
+    kb = _question_keyboard(game)
+    use_caption = _has_photo(q)
+    for attempt in range(_REFRESH_RETRIES):
+        try:
+            if use_caption:
+                await bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    caption=text,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+            else:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+            return
+        except TelegramRetryAfter as e:
+            log.info(
+                "games: chat=%d caption refresh flood, retry after %ss", chat_id, e.retry_after
+            )
+            await asyncio.sleep(e.retry_after + 0.5)
+        except (TelegramNetworkError, TelegramServerError):
+            await asyncio.sleep(0.5 * (attempt + 1))
+        except TelegramBadRequest:
+            return  # «not modified» / сообщение исчезло — не критично
+        except TelegramAPIError:
+            log.info("games: chat=%d caption refresh failed (ignored)", chat_id)
+            return
+
+
+def _cancel_pending_refresh(chat_id: int) -> None:
+    """Снять отложенный коалес-рефреш перед авторитетным переходом (следующий
+    вопрос / финал / стоп), чтобы поздняя правка не нарисовала старый раунд.
+    """
+    _refresh_dirty.pop(chat_id, None)
+    task = _refresh_tasks.pop(chat_id, None)
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
 
 @router.message(Command("flags"))
 async def cmd_flags(message: Message, command: CommandObject) -> None:
@@ -60,6 +171,7 @@ async def cmd_flagscancel(message: Message) -> None:
     if message.from_user is not None and message.from_user.id != game.starter_id:
         await message.answer("Отменить может только тот, кто запустил игру.")
         return
+    _cancel_pending_refresh(chat_id)
     games.cancel_game(chat_id)
     await message.answer("Игра отменена.")
 
@@ -91,7 +203,15 @@ async def _start_country_game(
         else:
             game = await games.start_capital_game(chat_id, num, starter_id)
     except games.GameAlreadyRunning:
-        await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
+        # Повторный вызов команды при уже идущей игре ТОГО ЖЕ вида —
+        # «переподнимаем» текущий вопрос свежим сообщением вниз чата (старое
+        # могло утонуть в переписке). Прогресс не сбрасываем. Для другой игры
+        # или загадок/алиаса (иной рендер) просто подсказываем, как прервать.
+        existing = games.get_game(chat_id)
+        if existing is not None and existing.kind is kind and not existing.is_finished:
+            await _resurface_question(message, existing)
+        else:
+            await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
         return
     except games.NotEnoughItems:
         await message.answer("⚠️ База стран пуста. Попробуй позже.")
@@ -132,10 +252,12 @@ async def on_answer(cb: CallbackQuery) -> None:
         await cb.answer("Ты уже отвечал в этом раунде.")
         return
 
-    game = games.get_game(chat_id)
-    if game is not None:
-        await _refresh_question_caption(cb, game, q_idx)
+    # Сначала гасим спиннер, потом коалес-рефреш подписи: когда отвечают пачкой,
+    # незачем плодить параллельные edit_caption по одному сообщению.
     await cb.answer("Принято ✅")
+    bot = cb.message.bot
+    if bot is not None:
+        _schedule_refresh(bot, chat_id)
 
 
 @router.callback_query(F.data == CB_STOP)
@@ -153,11 +275,12 @@ async def on_stop(cb: CallbackQuery) -> None:
         await cb.answer("Только тот, кто запустил игру.", show_alert=False)
         return
 
+    await cb.answer()
+    _cancel_pending_refresh(chat_id)
     await _finalize_round_caption(cb, game, game.current_idx)
     text = "<b>⏹ Игра остановлена.</b>\n\n" + games.format_scoreboard(game)
     games.cancel_game(chat_id)
     await cb.message.answer(text, parse_mode="HTML")
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith(CB_NEXT))
@@ -190,6 +313,14 @@ async def on_next(cb: CallbackQuery) -> None:
         await cb.answer()
         return
 
+    # Переход состоялся. Гасим спиннер СРАЗУ: дальше идут медленные операции
+    # (финализация подписи + отправка фото следующего вопроса), и если ждать
+    # их до `cb.answer`, кнопка «⏭ Далее» висит загрузкой всё это время.
+    await cb.answer()
+    # Снимаем отложенный коалес-рефреш прошлого раунда — он уже неактуален и
+    # мог бы затереть финализированную подпись.
+    _cancel_pending_refresh(chat_id)
+
     if game is not None:
         await _finalize_round_caption(cb, game, q_idx)
 
@@ -198,12 +329,10 @@ async def on_next(cb: CallbackQuery) -> None:
         text = games.format_scoreboard(game)
         games.cancel_game(chat_id)
         await cb.message.answer(text, parse_mode="HTML")
-        await cb.answer()
         return
 
     next_game = games.get_game(chat_id)
     if next_game is None:
-        await cb.answer()
         return
     try:
         await _send_question(cb.message, next_game)
@@ -212,7 +341,6 @@ async def on_next(cb: CallbackQuery) -> None:
         with suppress(TelegramAPIError):
             await cb.message.answer("⚠️ Не получилось показать следующий вопрос. Игра остановлена.")
         games.cancel_game(chat_id)
-    await cb.answer()
 
 
 def _parse_num_arg(raw: str | None) -> int | None:
@@ -306,13 +434,16 @@ async def _send_question(message: Message, game: games.Game) -> None:
 
     if photo is not None:
         try:
-            await bot.send_photo(
+            sent = await bot.send_photo(
                 chat_id=message.chat.id,
                 photo=photo,
                 caption=text,
                 parse_mode="HTML",
                 reply_markup=kb,
             )
+            # Запоминаем message_id текущего вопроса: по нему адресуем
+            # коалес-рефреш подписи и снимаем клавиатуру при «переподнятии».
+            game.active_message_id = sent.message_id
             return
         except TelegramAPIError as e:
             # Битые байты/URL/слишком большая картинка — теряем фото, но
@@ -324,32 +455,38 @@ async def _send_question(message: Message, game: games.Game) -> None:
                 e,
             )
 
-    await bot.send_message(
+    sent = await bot.send_message(
         chat_id=message.chat.id,
         text=text,
         parse_mode="HTML",
         reply_markup=kb,
     )
+    game.active_message_id = sent.message_id
+
+
+async def _resurface_question(message: Message, game: games.Game) -> None:
+    """Переподнять текущий вопрос свежим сообщением (повторный вызов команды).
+
+    Снимаем клавиатуру со старого сообщения (чтобы клики на стейл-кнопках не
+    дублировали раунд), гасим отложенный коалес-рефреш (он указывал на старое
+    сообщение) и публикуем вопрос заново. `_send_question` сам обновит
+    `active_message_id` на новое сообщение.
+    """
+    _cancel_pending_refresh(game.chat_id)
+    bot = message.bot
+    if game.active_message_id is not None and bot is not None:
+        with suppress(TelegramAPIError):
+            await bot.edit_message_reply_markup(
+                chat_id=game.chat_id,
+                message_id=game.active_message_id,
+                reply_markup=None,
+            )
+    await _send_question(message, game)
 
 
 def _has_photo(q: games.Question) -> bool:
     """Вопрос отправлялся как фото (URL или готовые байты)?"""
     return q.image_url is not None or q.image_bytes is not None
-
-
-async def _refresh_question_caption(cb: CallbackQuery, game: games.Game, q_idx: int) -> None:
-    if not isinstance(cb.message, Message) or q_idx != game.current_idx:
-        return
-    answered = games.answered_names(game, q_idx)
-    text = _question_text(game, answered)
-    kb = _question_keyboard(game)
-    q = game.current_question()
-    assert q is not None
-    with suppress(TelegramBadRequest):
-        if _has_photo(q):
-            await cb.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=kb)
-        else:
-            await cb.message.edit_text(text=text, parse_mode="HTML", reply_markup=kb)
 
 
 async def _finalize_round_caption(cb: CallbackQuery, game: games.Game, q_idx: int) -> None:

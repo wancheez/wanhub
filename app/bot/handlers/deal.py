@@ -18,7 +18,7 @@ import logging
 from datetime import UTC, datetime
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramBadRequest,
@@ -96,6 +96,109 @@ _auto_advance_tasks: dict[int, asyncio.Task[None]] = {}
 # `transition_to_banker`, не блокирует UI: пользователь видит офер сразу,
 # реплика дописывается через edit_text как только LLM ответит (~0.5–3 сек).
 _voice_tasks: dict[int, asyncio.Task[None]] = {}
+
+# Per-chat сериализация переходов фаз. Апдейты aiogram обрабатываются
+# параллельными тасками (handle_as_tasks=True, без лимита), поэтому два
+# одновременных «⏭ Далее», либо ручной клик и авто-таймер, могут войти в
+# `_try_advance` вместе. Сами мутации стейта в `deal` синхронные и атомарны,
+# но переход ещё и шлёт сообщения (bump) через await — лок гарантирует, что
+# фаза двигается строго по одному разу и сообщения перехода не переплетаются.
+_chat_locks: dict[int, asyncio.Lock] = {}
+
+
+def _chat_lock(chat_id: int) -> asyncio.Lock:
+    lock = _chat_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _chat_locks[chat_id] = lock
+    return lock
+
+
+# Коалесинг перерисовок общего сообщения. Когда много игроков жмут кнопки
+# одновременно, каждый клик правил бы один и тот же message_id через edit_text,
+# и Telegram быстро упирается во флуд-контроль одного сообщения: правки уходят
+# в ретраи со sleep, а `cb.answer` (который гасит спиннер на кнопке) ждёт за
+# ними — кнопка «зависает». Поэтому индивидуальный клик теперь только мутирует
+# стейт и сразу отвечает на callback, а перерисовку откладывает: одна таска на
+# чат с маленькой задержкой схлопывает пачку кликов в один edit. Таска читает
+# АКТУАЛЬНЫЙ стейт в момент срабатывания, поэтому опоздавшая правка безопасна —
+# она нарисует последнее состояние, а `dirty`-флаг гарантирует ещё один проход,
+# если клик пришёл уже во время рендера.
+_RENDER_DEBOUNCE_SECONDS = 0.25
+_render_tasks: dict[int, asyncio.Task[None]] = {}
+_render_dirty: dict[int, bool] = {}
+
+
+def _schedule_render(message: Message, session: deal.DealSession) -> None:
+    """Отметить общее сообщение «грязным» и (если ещё нет) запустить отложенный
+    коалес-рендер на этот чат. Дешёвая замена прямому `_render(edit=True)` на
+    горячем пути множественных кликов.
+    """
+    chat_id = session.chat_id
+    _render_dirty[chat_id] = True
+    existing = _render_tasks.get(chat_id)
+    if existing is not None and not existing.done():
+        return
+    bot = message.bot
+    if bot is None:
+        return
+    _render_tasks[chat_id] = asyncio.create_task(_coalesced_render_runner(bot, session))
+
+
+async def _coalesced_render_runner(bot: Bot, session: deal.DealSession) -> None:
+    chat_id = session.chat_id
+    try:
+        while True:
+            try:
+                await asyncio.sleep(_RENDER_DEBOUNCE_SECONDS)
+            except asyncio.CancelledError:
+                return
+            _render_dirty[chat_id] = False
+            # Сессия могла смениться/завершиться, пока ждали — старую не трогаем.
+            if deal.get_session(chat_id) is not session:
+                return
+            mid = session.current_message_id
+            if mid is None:
+                if not _render_dirty.get(chat_id):
+                    return
+                continue
+            text, kb = _render_payload(session)
+            try:
+                with _suppress_edit_noop():
+                    # Дефолты связывают значения этой итерации (B023): `_with_retry`
+                    # зовёт фабрику синхронно в этом же проходе, но так нагляднее.
+                    await _with_retry(
+                        lambda mid=mid, text=text, kb=kb: bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=mid,
+                            text=text,
+                            parse_mode="HTML",
+                            reply_markup=kb,
+                        ),
+                        what="coalesced edit_text",
+                    )
+            except asyncio.CancelledError:
+                return
+            except TelegramAPIError:
+                log.info("deal: chat=%d coalesced render edit failed (ignored)", chat_id)
+            # Накопилось ещё за время правки — ещё проход; иначе выходим.
+            if not _render_dirty.get(chat_id):
+                return
+    finally:
+        if _render_tasks.get(chat_id) is asyncio.current_task():
+            _render_tasks.pop(chat_id, None)
+
+
+def _cancel_pending_render(chat_id: int) -> None:
+    """Снять отложенный коалес-рендер перед авторитетным переходом (bump/финал/
+    отмена), чтобы поздняя правка не нарисовала неактуальное состояние поверх
+    свежего сообщения. Себя не отменяем (на случай вызова из самой таски).
+    """
+    _render_dirty.pop(chat_id, None)
+    task = _render_tasks.pop(chat_id, None)
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
 
 # Длительность пауз драм-реплея в финале. 2 сек — узнаваемо «ТВ»-ритмично,
 # но не так долго, чтобы зритель в чате терял нить.
@@ -772,45 +875,54 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
     Используется и ручным «⏭ Далее», и таймером авто-перехода. Безопасно
     вызывать в любой фазе: если условие готовности не выполнено, ничего не
     делает и возвращает False.
+
+    Тело под per-chat локом: два одновременных «Далее» (или клик + авто-таймер)
+    не должны переплести переход. Все проверки фазы и `finalize_*` синхронны и
+    выполняются до первого await под локом, так что второй вошедший увидит уже
+    сменившуюся фазу и тихо вернёт False.
     """
-    if session.phase is deal.DealPhase.OPENING and deal.is_round_complete(session):
-        # Банкер работает на КАЖДОМ раунде, включая последний (там он торгуется
-        # на 2 закрытых кейса — личный + один на столе). Те, кто откажется,
-        # пойдут в FINAL_SWAP через `finalize_banker`.
-        deal.transition_to_banker(session)
-        await _bump_phase(message, session)
-        _start_banker_voice(message, session)
-        return True
-    if session.phase is deal.DealPhase.BANKER and deal.all_active_decided(session):
-        # Кто только что взял Deal — нужно для drop-out анимации. Считаем
-        # до finalize_banker: иначе у dealt-игроков status уже станет "dealt"
-        # и difference не вычислить (но проще — пройтись по round_decisions).
-        offer_just = session.current_offer or 0
-        just_dealt = [
-            (session.players[uid].name, offer_just)
-            for uid, choice in session.round_decisions.items()
-            if choice == "deal"
-            and session.players.get(uid) is not None
-            and session.players[uid].status == "active"
-        ]
-        finalize_res = deal.finalize_banker(session)
-        if just_dealt:
-            await _announce_dropouts(message, just_dealt)
-        if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
+    async with _chat_lock(session.chat_id):
+        if session.phase is deal.DealPhase.OPENING and deal.is_round_complete(session):
+            # Банкер работает на КАЖДОМ раунде, включая последний (там он
+            # торгуется на 2 закрытых кейса — личный + один на столе). Те, кто
+            # откажется, пойдут в FINAL_SWAP через `finalize_banker`.
+            deal.transition_to_banker(session)
+            _cancel_pending_render(session.chat_id)  # старое сообщение уезжает
             await _bump_phase(message, session)
-        elif finalize_res is deal.FinalizeResult.OK_FINAL_SWAP:
-            # Те, кто отказался от финального офера, голосуют за SWAP. Без
-            # авто-таймера — обмен в финале слишком значимое решение, чтобы
-            # дефолтить за молчуна; ждём явный клик каждого активного.
-            await _bump_phase(message, session)
-        else:  # OK_FINISHED
+            _start_banker_voice(message, session)
+            return True
+        if session.phase is deal.DealPhase.BANKER and deal.all_active_decided(session):
+            # Кто только что взял Deal — нужно для drop-out анимации. Считаем
+            # до finalize_banker: иначе у dealt-игроков status уже станет "dealt"
+            # и difference не вычислить (но проще — пройтись по round_decisions).
+            offer_just = session.current_offer or 0
+            just_dealt = [
+                (session.players[uid].name, offer_just)
+                for uid, choice in session.round_decisions.items()
+                if choice == "deal"
+                and session.players.get(uid) is not None
+                and session.players[uid].status == "active"
+            ]
+            finalize_res = deal.finalize_banker(session)
+            _cancel_pending_render(session.chat_id)
+            if just_dealt:
+                await _announce_dropouts(message, just_dealt)
+            if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
+                await _bump_phase(message, session)
+            elif finalize_res is deal.FinalizeResult.OK_FINAL_SWAP:
+                # Те, кто отказался от финального офера, голосуют за SWAP. Без
+                # авто-таймера — обмен в финале слишком значимое решение, чтобы
+                # дефолтить за молчуна; ждём явный клик каждого активного.
+                await _bump_phase(message, session)
+            else:  # OK_FINISHED
+                await _finalize_and_summarize(message, session)
+            return True
+        if session.phase is deal.DealPhase.FINAL_SWAP and deal.all_active_decided_swap(session):
+            deal.finalize_swap(session)
+            _cancel_pending_render(session.chat_id)
             await _finalize_and_summarize(message, session)
-        return True
-    if session.phase is deal.DealPhase.FINAL_SWAP and deal.all_active_decided_swap(session):
-        deal.finalize_swap(session)
-        await _finalize_and_summarize(message, session)
-        return True
-    return False
+            return True
+        return False
 
 
 async def _announce_dropouts(message: Message, just_dealt: list[tuple[str, int]]) -> None:
@@ -1107,6 +1219,7 @@ async def _resurface_existing(message: Message, session: deal.DealSession) -> No
     больше — игра застревает навсегда. Поэтому здесь доигрываем финал.
     """
     _cancel_auto_advance(session.chat_id)
+    _cancel_pending_render(session.chat_id)
     prev_msg_id = session.current_message_id
     if prev_msg_id is not None and message.bot is not None:
         try:
@@ -1130,11 +1243,15 @@ async def _resurface_existing(message: Message, session: deal.DealSession) -> No
         # Отправляем замороженную доску как новое сообщение и сразу
         # «доигрываем» финал на нём: edit_text внутри `_finalize_and_summarize`
         # станет no-op (тот же текст — TelegramBadRequest подавлен), а дальше
-        # пойдёт drama replay → summary → DB → cancel_session.
-        text, kb = _render_payload(session)
-        sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
-        session.current_message_id = sent.message_id
-        await _finalize_and_summarize(sent, session)
+        # пойдёт drama replay → summary → DB → cancel_session. Под локом —
+        # чтобы два одновременных /deal не доиграли финал дважды.
+        async with _chat_lock(session.chat_id):
+            if deal.get_session(session.chat_id) is not session:
+                return  # другой /deal уже доиграл и снёс сессию
+            text, kb = _render_payload(session)
+            sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
+            session.current_message_id = sent.message_id
+            await _finalize_and_summarize(sent, session)
         return
 
     await _render(message, session, edit=False)
@@ -1151,6 +1268,7 @@ async def cmd_dealcancel(message: Message) -> None:
         await message.answer("Отменить может только тот, кто запустил.")
         return
     _cancel_auto_advance(chat_id)
+    _cancel_pending_render(chat_id)
     deal.cancel_session(chat_id)
     await message.answer("«Сделка» отменена.")
 
@@ -1291,8 +1409,10 @@ async def on_join(cb: CallbackQuery) -> None:
         await cb.answer("Ты уже в лобби.")
         return
     assert isinstance(cb.message, Message)
-    await _render(cb.message, session, edit=True)
+    # Сначала гасим спиннер, потом коалес-рендер: в лобби «Присоединиться»
+    # жмут пачкой, незачем плодить edit на каждого.
     await cb.answer("Принято ✅")
+    _schedule_render(cb.message, session)
 
 
 @router.callback_query(F.data.startswith(_CB_DECLINE))
@@ -1318,8 +1438,8 @@ async def on_decline(cb: CallbackQuery) -> None:
         await cb.answer("Ты уже отказался.")
         return
     assert isinstance(cb.message, Message)
-    await _render(cb.message, session, edit=True)
     await cb.answer("Принято: ты не играешь 🚫")
+    _schedule_render(cb.message, session)
 
 
 @router.callback_query(F.data.startswith(_CB_START))
@@ -1346,8 +1466,11 @@ async def on_start(cb: CallbackQuery) -> None:
         await cb.answer("Уже стартовала.")
         return
     assert isinstance(cb.message, Message)
-    await _render(cb.message, session, edit=True)
+    # Смена фазы — авторитетная перерисовка: снимаем отложенный лоббийный рендер,
+    # чтобы он не нарисовал старое лобби поверх экрана выбора кейса.
     await cb.answer()
+    _cancel_pending_render(session.chat_id)
+    await _render(cb.message, session, edit=True)
 
 
 @router.callback_query(F.data.startswith(_CB_PERSONAL))
@@ -1393,8 +1516,10 @@ async def on_pick_personal(cb: CallbackQuery) -> None:
         await cb.answer("Уже выбран.")
         return
     assert isinstance(cb.message, Message)
-    await _render(cb.message, session, edit=True)
+    # Смена фазы PICK_PERSONAL → OPENING — авторитетный рендер.
     await cb.answer(f"Личный кейс: {_case_emoji(case_id)}")
+    _cancel_pending_render(session.chat_id)
+    await _render(cb.message, session, edit=True)
 
 
 @router.callback_query(F.data.startswith(_CB_OPEN))
@@ -1434,19 +1559,24 @@ async def on_open_case(cb: CallbackQuery) -> None:
         # Гонка: пока сообщение редактировалось, кто-то уже добил раунд.
         # Перерисуем под актуальное состояние (кнопка «⏭ Далее»).
         assert isinstance(cb.message, Message)
-        await _render(cb.message, session, edit=True)
         await cb.answer("Раунд уже завершён — жми ⏭ Далее.")
+        _schedule_render(cb.message, session)
         return
 
     assert isinstance(cb.message, Message)
     value = session.case_values[case_id]
-    # Раунд может закончиться этим открытием (`OK_END_OF_ROUND`): перерисовываем
-    # (next-клаву подложит `_render_payload`) и заводим таймер авто-перехода.
-    # Ручной «⏭ Далее» отменит таймер; иначе через 30 сек сработает сам.
-    await _render(cb.message, session, edit=True)
-    if res is deal.OpenResult.OK_END_OF_ROUND:
-        _start_auto_advance(cb.message, session)
     await cb.answer(f"Кейс {_case_emoji(case_id)}: {_fmt_rub(value)}")
+    if res is deal.OpenResult.OK_END_OF_ROUND:
+        # Конец раунда — авторитетная смена клавиатуры на «⏭ Далее» + таймер
+        # авто-перехода. Прямой рендер, чтобы кнопка появилась сразу; снимаем
+        # отложенные коалес-рендеры открытий, они уже неактуальны.
+        _cancel_pending_render(session.chat_id)
+        await _render(cb.message, session, edit=True)
+        _start_auto_advance(cb.message, session)
+    else:
+        # Обычное открытие в середине раунда — коалесим, чтобы пачка
+        # одновременных открытий схлопнулась в одну правку сетки.
+        _schedule_render(cb.message, session)
 
 
 @router.callback_query(F.data.startswith(_CB_DEAL))
@@ -1495,22 +1625,25 @@ async def _handle_decision(
         # на случай, если прошлый edit_text был проглочен `_suppress_edit_noop`.
         prev = session.round_decisions.get(cb.from_user.id)
         prev_label = "✅ Сделка" if prev == "deal" else "❌ Не сделка" if prev == "no_deal" else "?"
-        if isinstance(cb.message, Message):
-            await _render(cb.message, session, edit=True)
         await cb.answer(f"Ты уже выбрал: {prev_label}")
+        if isinstance(cb.message, Message):
+            _schedule_render(cb.message, session)
         return
     if res is deal.DecisionResult.WRONG_PHASE:
         await cb.answer("Сейчас не время решать.")
         return
 
     assert isinstance(cb.message, Message)
-    # Перерисовываем: если все решили, `_render_payload` подложит «⏭ Далее»
-    # и заводим таймер авто-перехода. Ручной клик отменит таймер; иначе через
-    # 30 сек банкер-раунд закроется сам.
-    await _render(cb.message, session, edit=True)
-    if deal.all_active_decided(session):
-        _start_auto_advance(cb.message, session)
+    # Спиннер гасим сразу. Если все решили — подкладываем «⏭ Далее» и заводим
+    # таймер авто-перехода (прямой рендер, чтобы кнопка появилась без задержки).
+    # Иначе коалесим: пачка одновременных Deal/No Deal схлопнется в одну правку.
     await cb.answer("✅ Сделка принята" if choice == "deal" else "❌ Не сделка принята")
+    if deal.all_active_decided(session):
+        _cancel_pending_render(session.chat_id)
+        await _render(cb.message, session, edit=True)
+        _start_auto_advance(cb.message, session)
+    else:
+        _schedule_render(cb.message, session)
 
 
 @router.callback_query(F.data.startswith(_CB_KEEP))
@@ -1553,19 +1686,19 @@ async def _handle_swap_choice(
     if res is deal.DecisionResult.ALREADY_DECIDED:
         prev = session.swap_decisions.get(cb.from_user.id)
         prev_label = "🎒 Оставить" if prev == "keep" else "🔄 Поменять" if prev == "swap" else "?"
-        if isinstance(cb.message, Message):
-            await _render(cb.message, session, edit=True)
         await cb.answer(f"Ты уже выбрал: {prev_label}")
+        if isinstance(cb.message, Message):
+            _schedule_render(cb.message, session)
         return
     if res is deal.DecisionResult.WRONG_PHASE:
         await cb.answer("Сейчас не финал.")
         return
 
     assert isinstance(cb.message, Message)
-    await _render(cb.message, session, edit=True)
     # В FINAL_SWAP авто-таймер не запускаем — финализация только по ручному
     # «⏭ Далее». Любой игрок партии может нажать его, как только все решили.
     await cb.answer("🎒 Оставил личный" if choice == "keep" else "🔄 Поменял")
+    _schedule_render(cb.message, session)
 
 
 @router.callback_query(F.data.startswith(_CB_NEXT))
@@ -1599,12 +1732,12 @@ async def on_next(cb: CallbackQuery) -> None:
         # Защита от рассинхронизации: сообщение могло показывать «⏭ Далее»,
         # а серверный стейт говорит «раунд не завершён». Перерисуем под
         # актуальное состояние, чтобы игрок не «застрял» на ⏭.
-        await _render(cb.message, session, edit=True)
         await cb.answer("Сначала откройте все кейсы раунда.")
+        _schedule_render(cb.message, session)
         return
     if session.phase is deal.DealPhase.FINAL_SWAP and not deal.all_active_decided_swap(session):
-        await _render(cb.message, session, edit=True)
         await cb.answer("Не все ещё решили.")
+        _schedule_render(cb.message, session)
         return
     if session.phase is deal.DealPhase.BANKER and not deal.all_active_decided(session):
         # То же самое: текст и проверка могли разойтись (например, гонка двух
@@ -1624,8 +1757,8 @@ async def on_next(cb: CallbackQuery) -> None:
             {uid: (p.name, p.status) for uid, p in session.players.items()},
             session.round_idx,
         )
-        await _render(cb.message, session, edit=True)
         await cb.answer("Не все ещё решили.")
+        _schedule_render(cb.message, session)
         return
 
     try:
@@ -1660,6 +1793,7 @@ async def on_cancel(cb: CallbackQuery) -> None:
         await cb.answer("Только стартер.", show_alert=False)
         return
     _cancel_auto_advance(chat_id)
+    _cancel_pending_render(chat_id)
     deal.cancel_session(chat_id)
     assert isinstance(cb.message, Message)
     with _suppress_edit_noop():
@@ -1711,8 +1845,11 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
     """
     # На время реплея гасим внешние таймеры: LLM-таска не должна дописать
     # реплику банкира в уже-замороженное сообщение, а авто-таймер — повторить
-    # переход. До записи в БД оба должны быть мертвы.
+    # переход. До записи в БД оба должны быть мертвы. Отложенный коалес-рендер
+    # тоже снимаем — иначе он перерисует «живую» клавиатуру поверх замороженной
+    # доски уже после финала.
     _cancel_auto_advance(session.chat_id)
+    _cancel_pending_render(session.chat_id)
 
     try:
         # Доска — последняя картина состояния, без клавиатуры.
