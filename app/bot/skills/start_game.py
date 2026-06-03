@@ -25,7 +25,7 @@ from typing import Any
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from app.core.config import DEFAULT_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS
+from app.core.config import MAX_QUIZ_QUESTIONS
 from app.services import games
 
 log = logging.getLogger("app")
@@ -277,8 +277,15 @@ class StartGameSkill:
             await start_alias_from_skill(message, num_words=requested)
             return
 
-        # flags / capitals — единственный параметр (число) либо в тексте, либо дефолт.
-        num = params["num"] or DEFAULT_QUIZ_QUESTIONS
+        # flags / capitals. Если в тексте указано число («флаги 10») —
+        # стартуем сразу; иначе показываем пикер 5/10/20.
+        from app.bot.handlers.games import prompt_question_count
+
+        kind = games.GameKind.FLAG if game_name == "flags" else games.GameKind.CAPITAL
+        num = params["num"]
+        if not num:
+            await prompt_question_count(message, kind)
+            return
         try:
             if game_name == "flags":
                 game = await games.start_flag_game(chat_id, num, starter_id)

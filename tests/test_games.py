@@ -207,34 +207,35 @@ def test_answered_names_in_order() -> None:
     assert games.answered_names(game, 0) == ["Иван", "Петя"]
 
 
-def test_parse_num_arg_default_when_empty() -> None:
-    from app.bot.handlers.games import _parse_num_arg
+def test_parse_count_arg_none_when_empty() -> None:
+    # Пусто → None: хендлер покажет пикер 5/10/20, а не дефолтит молча.
+    from app.bot.handlers.games import _parse_count_arg
 
-    assert _parse_num_arg(None) == 5
-    assert _parse_num_arg("") == 5
-    assert _parse_num_arg("   ") == 5
-
-
-def test_parse_num_arg_valid_int() -> None:
-    from app.bot.handlers.games import _parse_num_arg
-
-    assert _parse_num_arg("10") == 10
-    assert _parse_num_arg(" 7 ") == 7
+    assert _parse_count_arg(None) is None
+    assert _parse_count_arg("") is None
+    assert _parse_count_arg("   ") is None
 
 
-def test_parse_num_arg_out_of_range() -> None:
-    from app.bot.handlers.games import _parse_num_arg
+def test_parse_count_arg_valid_int() -> None:
+    from app.bot.handlers.games import _parse_count_arg
 
-    assert _parse_num_arg("0") is None
-    assert _parse_num_arg("31") is None
-    assert _parse_num_arg("-1") is None
+    assert _parse_count_arg("10") == 10
+    assert _parse_count_arg(" 7 ") == 7
 
 
-def test_parse_num_arg_garbage() -> None:
-    from app.bot.handlers.games import _parse_num_arg
+def test_parse_count_arg_out_of_range() -> None:
+    from app.bot.handlers.games import _parse_count_arg
 
-    assert _parse_num_arg("abc") is None
-    assert _parse_num_arg("5x") is None
+    assert _parse_count_arg("0") is None
+    assert _parse_count_arg("31") is None
+    assert _parse_count_arg("-1") is None
+
+
+def test_parse_count_arg_garbage() -> None:
+    from app.bot.handlers.games import _parse_count_arg
+
+    assert _parse_count_arg("abc") is None
+    assert _parse_count_arg("5x") is None
 
 
 def test_start_flag_game_kind() -> None:

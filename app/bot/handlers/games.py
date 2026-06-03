@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.core.config import DEFAULT_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS
+from app.core.config import MAX_QUIZ_QUESTIONS
 from app.services import blackjack, deal, games
 
 router = Router(name="games")
@@ -39,11 +39,21 @@ log = logging.getLogger("app")
 CB_ANSWER = "flg:a:"
 CB_NEXT = "flg:n:"
 CB_STOP = "flg:s"
+CB_COUNT = "flg:c:"  # выбор числа вопросов: payload «<код игры>:<число>»
 
-_CMD_NAMES: dict[games.GameKind, str] = {
-    games.GameKind.FLAG: "/flags",
-    games.GameKind.CAPITAL: "/capitals",
-    games.GameKind.LLM_QUIZ: "/quiz",
+# Варианты числа вопросов в пикере для /flags и /capitals.
+COUNT_CHOICES: tuple[int, ...] = (5, 10, 20)
+
+# Однобуквенные коды игр в callback пикера (короче, чем enum-значения).
+_KIND_CODE: dict[games.GameKind, str] = {
+    games.GameKind.FLAG: "f",
+    games.GameKind.CAPITAL: "c",
+}
+_CODE_KIND: dict[str, games.GameKind] = {v: k for k, v in _KIND_CODE.items()}
+
+_KIND_TITLE: dict[games.GameKind, str] = {
+    games.GameKind.FLAG: "🏳️ Флаги",
+    games.GameKind.CAPITAL: "🏙️ Столицы",
 }
 
 # Коалесинг обновлений подписи вопроса. Апдейты aiogram обрабатываются
@@ -176,37 +186,59 @@ async def cmd_flagscancel(message: Message) -> None:
     await message.answer("Игра отменена.")
 
 
-async def _start_country_game(
-    message: Message, command: CommandObject, kind: games.GameKind
-) -> None:
-    chat_id = message.chat.id
-    if blackjack.get_session(chat_id) is not None:
-        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
-        return
-    if deal.get_session(chat_id) is not None:
-        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
-        return
-    cmd_name = _CMD_NAMES[kind]
-    num = _parse_num_arg(command.args)
-    if num is None:
-        await message.answer(
-            f"Используй: <code>{cmd_name} [число]</code>\n"
-            f"Число — от 1 до {MAX_QUIZ_QUESTIONS} (по умолчанию {DEFAULT_QUIZ_QUESTIONS}).",
-            parse_mode="HTML",
-        )
-        return
+def _kb_count_picker(kind: games.GameKind) -> InlineKeyboardMarkup:
+    """Клавиатура выбора числа вопросов (5 / 10 / 20) для /flags и /capitals."""
+    code = _KIND_CODE[kind]
+    builder = InlineKeyboardBuilder()
+    for n in COUNT_CHOICES:
+        builder.button(text=str(n), callback_data=f"{CB_COUNT}{code}:{n}")
+    builder.adjust(len(COUNT_CHOICES))
+    return builder.as_markup()
 
-    starter_id = message.from_user.id if message.from_user else 0
+
+def _count_prompt_text(kind: games.GameKind) -> str:
+    return f"<b>{_KIND_TITLE[kind]}</b>\nСколько вопросов? Жмёт любой."
+
+
+async def prompt_question_count(message: Message, kind: games.GameKind) -> None:
+    """Показать пикер числа вопросов (или переподнять уже идущую игру).
+
+    Общая точка для команды без числа и текстового триггера без числа. Если в
+    чате уже идёт игра ТОГО ЖЕ вида — переподнимаем её вопрос, а не плодим
+    второй пикер; если другая игра — подсказываем, как прервать.
+    """
+    chat_id = message.chat.id
+    existing = games.get_game(chat_id)
+    if existing is not None:
+        if existing.kind is kind and not existing.is_finished:
+            await _resurface_question(message, existing)
+        else:
+            await message.answer("В этом чате уже идёт игра. /flagscancel — чтобы прервать.")
+        return
+    await message.answer(
+        _count_prompt_text(kind),
+        parse_mode="HTML",
+        reply_markup=_kb_count_picker(kind),
+    )
+
+
+async def _launch_country_game(
+    message: Message, kind: games.GameKind, num: int, starter_id: int
+) -> None:
+    """Создать партию флагов/столиц на `num` вопросов и отправить первый вопрос.
+
+    Общий путь для явного числа в команде и для выбора через пикер. Все
+    конфликты/ошибки игры обрабатываются здесь единообразно.
+    """
+    chat_id = message.chat.id
     try:
         if kind is games.GameKind.FLAG:
             game = await games.start_flag_game(chat_id, num, starter_id)
         else:
             game = await games.start_capital_game(chat_id, num, starter_id)
     except games.GameAlreadyRunning:
-        # Повторный вызов команды при уже идущей игре ТОГО ЖЕ вида —
-        # «переподнимаем» текущий вопрос свежим сообщением вниз чата (старое
-        # могло утонуть в переписке). Прогресс не сбрасываем. Для другой игры
-        # или загадок/алиаса (иной рендер) просто подсказываем, как прервать.
+        # Гонка: пока выбирали число, кто-то уже запустил игру того же вида —
+        # «переподнимаем» её вопрос. Для другой игры — подсказка про отмену.
         existing = games.get_game(chat_id)
         if existing is not None and existing.kind is kind and not existing.is_finished:
             await _resurface_question(message, existing)
@@ -222,6 +254,65 @@ async def _start_country_game(
         return
 
     await _send_question(message, game)
+
+
+async def _start_country_game(
+    message: Message, command: CommandObject, kind: games.GameKind
+) -> None:
+    chat_id = message.chat.id
+    if blackjack.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.")
+        return
+    if deal.get_session(chat_id) is not None:
+        await message.answer("В этом чате идёт «Сделка». Сначала /dealcancel.")
+        return
+
+    num = _parse_count_arg(command.args)
+    # Число явно не задано (или некорректно) — показываем пикер 5/10/20. Явное
+    # валидное число (например `/flags 15`) по-прежнему стартует сразу.
+    if num is None:
+        await prompt_question_count(message, kind)
+        return
+
+    starter_id = message.from_user.id if message.from_user else 0
+    await _launch_country_game(message, kind, num, starter_id)
+
+
+@router.callback_query(F.data.startswith(CB_COUNT))
+async def on_pick_count(cb: CallbackQuery) -> None:
+    """Выбор числа вопросов в пикере: кто нажал — тот и стартер партии."""
+    if not isinstance(cb.message, Message) or cb.data is None or cb.from_user is None:
+        await cb.answer()
+        return
+    payload = cb.data[len(CB_COUNT) :]
+    code, _, raw_num = payload.partition(":")
+    kind = _CODE_KIND.get(code)
+    try:
+        num = int(raw_num)
+    except ValueError:
+        num = 0
+    if kind is None or num <= 0:
+        await cb.answer("Битый callback.", show_alert=True)
+        return
+
+    chat_id = cb.message.chat.id
+    if blackjack.get_session(chat_id) is not None:
+        await cb.answer("В этом чате идёт блэкджек. Сначала /blackjackcancel.", show_alert=True)
+        return
+    if deal.get_session(chat_id) is not None:
+        await cb.answer("В этом чате идёт «Сделка». Сначала /dealcancel.", show_alert=True)
+        return
+
+    # Гасим спиннер сразу: создание партии тянет страны из БД и может быть не
+    # мгновенным. Убираем кнопки пикера, чтобы по нему нельзя было нажать дважды.
+    await cb.answer()
+    with suppress(TelegramAPIError):
+        await cb.message.edit_text(
+            f"<b>{_KIND_TITLE[kind]}</b>\n{num} вопросов. Поехали!",
+            parse_mode="HTML",
+        )
+
+    await _launch_country_game(cb.message, kind, num, cb.from_user.id)
 
 
 @router.callback_query(F.data.startswith(CB_ANSWER))
@@ -343,14 +434,14 @@ async def on_next(cb: CallbackQuery) -> None:
         games.cancel_game(chat_id)
 
 
-def _parse_num_arg(raw: str | None) -> int | None:
-    """Вернуть валидное число вопросов или None если аргумент некорректен.
+def _parse_count_arg(raw: str | None) -> int | None:
+    """Явно заданное валидное число вопросов или None.
 
-    Пустой аргумент → дефолт. Не-число или вне диапазона → None (хендлер
-    покажет хелп).
+    Пустой/нечисловой/вне диапазона аргумент → None: в этом случае хендлер
+    показывает пикер 5/10/20. Только явное число в [1, MAX] стартует сразу.
     """
     if raw is None or not raw.strip():
-        return DEFAULT_QUIZ_QUESTIONS
+        return None
     try:
         n = int(raw.strip())
     except ValueError:
