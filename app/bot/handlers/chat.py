@@ -1,3 +1,4 @@
+import io
 import logging
 import re
 from html import escape
@@ -8,6 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
+    BufferedInputFile,
     Message,
     MessageOriginChat,
     MessageOriginHiddenUser,
@@ -17,12 +19,14 @@ from aiogram.types import (
 from app.bot.format import for_telegram
 from app.bot.skills import try_skills
 from app.services.chat import chat, reset_chat
+from app.services.image_generate import edit_image
 
 router = Router(name="chat")
 log = logging.getLogger("app")
 
 TG_MAX = 4000  # Telegram limit is 4096; leave headroom for HTML tags
 MAX_QUOTED_CHARS = 1000  # cap reply-context quote to keep Claude prompts small
+IMAGE_CAPTION_MAX = 200  # подпись к отредактированному фото — Telegram лимит 1024
 
 # Trigger: message starts with the word "Чат" (any case), optionally followed
 # by punctuation/space. In groups required; in private chats optional.
@@ -114,6 +118,57 @@ async def chat_prefix(message: Message, state: FSMContext) -> None:
             await message.answer("Чат — а дальше что? Напиши вопрос после слова «Чат».")
         return
     await _route(message, body, state)
+
+
+@router.message(F.photo)
+async def edit_photo(message: Message) -> None:
+    """Фото с подписью → правка картинки через Gemini (Nano Banana).
+
+    Гейтинг как у текста: в группе нужна «Чат …» в подписи, в личке достаточно
+    подписи. Подпись-инструкция передаётся модели вместе с самим фото.
+    """
+    caption = message.caption or ""
+    is_private = message.chat.type == "private"
+    instruction, had_prefix = extract_body(caption, is_private)
+    if instruction is None:
+        return  # группа без «Чат» — молча игнорируем
+    if not instruction:
+        if had_prefix or is_private:
+            await message.answer("Пришли фото с подписью — что на нём изменить.")
+        return
+    if not message.photo:  # F.photo гарантирует, но успокаиваем типизатор
+        return
+
+    assert message.bot is not None  # aiogram populates this for incoming updates
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+
+    # message.photo — список превью по возрастанию размера; берём самое крупное.
+    photo = message.photo[-1]
+    src = await message.bot.get_file(photo.file_id)
+    if src.file_path is None:
+        await message.answer("Не удалось скачать фото из Telegram, попробуй ещё раз.")
+        return
+    buf = io.BytesIO()
+    await message.bot.download_file(src.file_path, buf)
+    log.info(
+        "edit_photo: in=%dx%d %dB instruction=%r",
+        photo.width,
+        photo.height,
+        buf.getbuffer().nbytes,
+        instruction[:60],
+    )
+
+    result = await edit_image(instruction, buf.getvalue(), mime="image/jpeg")
+    if result is None:
+        await message.answer("Не получилось изменить картинку, попробуй переформулировать.")
+        return
+
+    body, mime = result
+    ext = mime.removeprefix("image/").split("+")[0] or "jpg"
+    await message.answer_photo(
+        BufferedInputFile(body, filename=f"edited.{ext}"),
+        caption=instruction[:IMAGE_CAPTION_MAX],
+    )
 
 
 async def _route(message: Message, text: str, state: FSMContext) -> None:

@@ -9,15 +9,36 @@ from app.services.image_generate import generate_image
 
 log = logging.getLogger("app")
 
-# Творческие глаголы генерации. Намеренно НЕ пересекаются с глаголами поиска
-# из send_image (покажи/найди/пришли/скинь/кинь/дай/отправь): «нарисуй кота»
-# идёт в генерацию, «покажи фото кота» — в поиск реального фото.
+# Глаголы генерации картинки. Это и творческие («нарисуй/сгенерируй/придумай»),
+# и «дай мне картинку» (пришли/скинь/кинь/дай/отправь). В поиск реальных фото
+# уходят ТОЛЬКО найди/поищи/ищи/загугли/поиск (см. send_image) — они здесь
+# намеренно отсутствуют. «покажи» не используем: слишком широкий («покажи
+# погоду/меню»). GenerateImageSkill стоит в SKILLS раньше SendImageSkill.
 GEN_RE = re.compile(
-    r"^(?:нарисуй|сгенерируй|сгенери|сгенерируй-ка|придумай|нарисуй-ка)\s+"
+    r"^(?:"
+    r"нарисуй|нарисуй-ка|сгенерируй|сгенерируй-ка|сгенери|придумай|"
+    r"пришли|скинь|кинь|дай|отправь"
+    r")\s+"
     r"(?:мне\s+)?"
     r"(.+?)[.!?]*\s*$",
     re.IGNORECASE,
 )
+
+# Слова-маркеры картинки. Если запрос начинается с такого слова без глагола
+# («картинку кота», «фото заката») — это тоже запрос на генерацию. Голое «пик»
+# исключаем (омоним «вершина горы»). Те же формы срезаем как лишний префикс
+# после глагола: «покажи картинку дракона» → промпт «дракона».
+_IMAGE_NOUNS = (
+    r"фото|фотку|фотка|фотки|"
+    r"фотографию|фотография|фотографии|"
+    r"картинку|картинка|картинки|"
+    r"пикчу|пикча|пикчи|"
+    r"изображение|изображения"
+)
+LEADING_NOUN_RE = re.compile(rf"^(?:{_IMAGE_NOUNS}|пик)\s+", re.IGNORECASE)
+NOUN_LEAD_RE = re.compile(rf"^(?:{_IMAGE_NOUNS})\s+(.+?)[.!?]*\s*$", re.IGNORECASE)
+
+EDGE_TRIM = " ,.:;-—\t\n"
 
 # Telegram caption limit — 1024; промпты короче, режем с запасом.
 CAPTION_MAX = 200
@@ -29,11 +50,24 @@ def extract_generate_intent(text: str) -> dict[str, str] | None:
     Public so the web chat (или тесты) могут переиспользовать матчер без
     aiogram-зависимого хендлера.
     """
-    m = GEN_RE.match(text.strip())
-    if not m:
-        return None
-    prompt = m.group(1).strip(" ,.:;-—\t\n")
-    return {"prompt": prompt} if prompt else None
+    stripped = text.strip()
+
+    # Глагол-led: «нарисуй кота», «покажи картинку дракона», «пришли мне закат».
+    m = GEN_RE.match(stripped)
+    if m:
+        prompt = m.group(1).strip()
+        # «покажи картинку дракона» → «дракона»: срезаем лишний маркер картинки.
+        prompt = LEADING_NOUN_RE.sub("", prompt, count=1).strip(EDGE_TRIM)
+        return {"prompt": prompt} if prompt else None
+
+    # Noun-led без глагола: «картинку кота», «фото заката». Голое «пик» сюда
+    # не попадает (нет в _IMAGE_NOUNS), так что «пик горы Эверест» не матчится.
+    m = NOUN_LEAD_RE.match(stripped)
+    if m:
+        prompt = m.group(1).strip(EDGE_TRIM)
+        return {"prompt": prompt} if prompt else None
+
+    return None
 
 
 def _safe_filename_stem(prompt: str) -> str:

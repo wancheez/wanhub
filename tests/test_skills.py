@@ -3,124 +3,101 @@ from app.bot.skills.send_image import SendImageSkill
 from app.bot.skills.show_dealtop import ShowDealTopSkill, extract_dealtop_intent
 from app.bot.skills.start_game import StartGameSkill, extract_game_intent
 
+# ----- SendImageSkill (поиск реального фото: только найди/поищи/ищи/...) -----
 
-def test_match_basic():
+
+def test_search_match_basic():
     s = SendImageSkill()
-    r = s.match("пришли фото кота")
+    r = s.match("найди фото кота")
     assert r == {"raw": "фото кота", "fallback": "кота"}
 
 
-def test_match_capitalized():
+def test_search_match_poishi():
     s = SendImageSkill()
-    r = s.match("Покажи картинку дракона")
+    r = s.match("поищи картинку дракона")
     assert r is not None
     assert r["fallback"] == "дракона"
 
 
-def test_match_with_pronoun():
+def test_search_match_with_pronoun():
     s = SendImageSkill()
     r = s.match("найди мне фотку заката")
     assert r is not None
     assert r["fallback"] == "заката"
 
 
-def test_match_trailing_punctuation():
+def test_search_match_capitalized():
     s = SendImageSkill()
-    r = s.match("скинь пикчу пиццы.")
+    r = s.match("Найди картинку дракона")
+    assert r is not None
+    assert r["fallback"] == "дракона"
+
+
+def test_search_match_trailing_punctuation():
+    s = SendImageSkill()
+    r = s.match("поищи пикчу пиццы.")
     assert r is not None
     assert r["fallback"] == "пиццы"
 
 
-def test_match_multi_word_subject():
+def test_search_match_multi_word_subject():
     s = SendImageSkill()
-    r = s.match("покажи фото морского заката")
+    r = s.match("найди фото морского заката")
     assert r is not None
     assert r["fallback"] == "морского заката"
 
 
-def test_match_adjective_before_noun():
+def test_search_match_zagugli():
     s = SendImageSkill()
-    r = s.match("пришли смешную картинку")
+    r = s.match("загугли картинку эйфелевой башни")
     assert r is not None
-    assert r["fallback"] == "смешную"
+    assert r["fallback"] == "эйфелевой башни"
 
 
-def test_match_with_comma_and_relative_clause():
+def test_search_match_poisk_noun_verb():
     s = SendImageSkill()
-    # The case from production: "пришли картинку, которую ты считаешь смешной"
-    r = s.match("пришли картинку, которую ты считаешь очень веселой")
+    r = s.match("поиск фото кота")
     assert r is not None
-    assert "веселой" in r["fallback"]
-    # `raw` should retain the original wording for the LLM rewriter.
-    assert "которую" in r["raw"]
-    assert "картинку" in r["raw"]
+    assert r["fallback"] == "кота"
 
 
-def test_match_metaphorical_request():
+# Глаголы доставки уехали в генерацию — поиск их больше НЕ ловит.
+
+
+def test_search_no_match_delivery_verbs():
     s = SendImageSkill()
-    # Edge case: "которую не поймут люди" — meaningless to DDG verbatim,
-    # but the LLM can interpret it. We should still match the intent.
-    r = s.match("пришли картинку, которую не поймут люди")
-    assert r is not None
-    assert "не поймут" in r["raw"]
+    assert s.match("пришли фото кота") is None
+    assert s.match("покажи картинку дракона") is None
+    assert s.match("скинь пикчу пиццы") is None
 
 
-def test_no_match_greeting():
+def test_search_no_match_noun_led():
+    # Без глагола поиска (найди/поищи/...) — не поиск; это уйдёт в генерацию.
+    s = SendImageSkill()
+    assert s.match("фото жвачки по рублю") is None
+    assert s.match("картинку котика") is None
+
+
+def test_search_no_match_greeting():
     s = SendImageSkill()
     assert s.match("привет") is None
 
 
-def test_no_match_general_question():
+def test_search_no_match_general_question():
     s = SendImageSkill()
     assert s.match("расскажи про котов") is None
 
 
-def test_no_match_just_verb():
+def test_search_no_match_no_image_noun():
     s = SendImageSkill()
-    # Verb matches, but no image-noun.
-    assert s.match("пришли подарок") is None
+    # Глагол поиска есть, но слова-маркера картинки нет.
+    assert s.match("найди ресторан рядом") is None
 
 
-def test_no_match_empty_subject():
+def test_search_no_match_empty_subject():
     s = SendImageSkill()
-    # "пришли фото" — no subject after.
-    assert s.match("пришли фото") is None
-
-
-def test_match_noun_led_photo():
-    """«фото X» без глагола — продакшен-кейс «Чат фото жвачки по рублю»."""
-    s = SendImageSkill()
-    r = s.match("фото жвачки по рублю")
-    assert r is not None
-    assert r["fallback"] == "жвачки по рублю"
-    assert r["raw"] == "фото жвачки по рублю"
-
-
-def test_match_noun_led_accusative():
-    s = SendImageSkill()
-    r = s.match("картинку котика")
-    assert r is not None
-    assert r["fallback"] == "котика"
-
-
-def test_match_noun_led_capitalized_with_punct():
-    s = SendImageSkill()
-    r = s.match("Фотку морского заката!")
-    assert r is not None
-    assert r["fallback"] == "морского заката"
-
-
-def test_no_match_bare_noun():
-    s = SendImageSkill()
-    # «фото» / «картинка» в одиночку — субъекта нет, не запрос.
-    assert s.match("фото") is None
-    assert s.match("картинка") is None
-
-
-def test_no_match_pik_noun_led():
-    s = SendImageSkill()
-    # «пик» в начале без глагола — омоним «вершина горы», не картинка.
-    assert s.match("пик горы Эверест") is None
+    # "найди фото" — субъекта после нет.
+    assert s.match("найди фото") is None
 
 
 # ----- StartGameSkill -----
@@ -647,10 +624,53 @@ def test_generate_match_short_generate_verb():
     assert extract_generate_intent("сгенери пейзаж") == {"prompt": "пейзаж"}
 
 
+# Глаголы доставки (пришли/скинь/кинь/дай/отправь) тоже генерируют картинку.
+# «покажи» намеренно исключён — слишком широкий.
+
+
+def test_generate_match_delivery_verb_bare():
+    assert extract_generate_intent("пришли кота") == {"prompt": "кота"}
+
+
+def test_generate_match_delivery_verb_with_noun_stripped():
+    # «скинь картинку дракона» → лишний маркер «картинку» срезается.
+    assert extract_generate_intent("скинь картинку дракона") == {"prompt": "дракона"}
+
+
+def test_generate_match_prishli_with_noun():
+    assert extract_generate_intent("пришли фото кота") == {"prompt": "кота"}
+
+
+def test_generate_match_skin_trailing_punct():
+    assert extract_generate_intent("скинь пикчу пиццы.") == {"prompt": "пиццы"}
+
+
+def test_generate_match_delivery_with_pronoun():
+    assert extract_generate_intent("пришли мне рыжего кота") == {"prompt": "рыжего кота"}
+
+
+def test_generate_no_match_pokazhi():
+    # «покажи» исключён из генерации — не должен матчиться.
+    assert extract_generate_intent("покажи кота") is None
+    assert extract_generate_intent("покажи картинку дракона") is None
+
+
+def test_generate_match_noun_led():
+    assert extract_generate_intent("картинку котика") == {"prompt": "котика"}
+
+
+def test_generate_match_noun_led_multiword():
+    assert extract_generate_intent("фото морского заката") == {"prompt": "морского заката"}
+
+
+def test_generate_match_noun_led_capitalized_punct():
+    assert extract_generate_intent("Фотку морского заката!") == {"prompt": "морского заката"}
+
+
 def test_generate_no_match_search_verb():
     # Глаголы поиска принадлежат send_image — генерация их НЕ ловит.
-    assert extract_generate_intent("покажи фото кота") is None
-    assert extract_generate_intent("пришли картинку дракона") is None
+    assert extract_generate_intent("найди фото кота") is None
+    assert extract_generate_intent("поищи картинку дракона") is None
 
 
 def test_generate_no_match_greeting():
@@ -660,6 +680,17 @@ def test_generate_no_match_greeting():
 def test_generate_no_match_bare_verb():
     # Глагол есть, предмета нет.
     assert extract_generate_intent("нарисуй") is None
+
+
+def test_generate_no_match_bare_noun():
+    # Голый маркер без субъекта — не запрос.
+    assert extract_generate_intent("картинка") is None
+    assert extract_generate_intent("фото") is None
+
+
+def test_generate_no_match_pik_noun_led():
+    # «пик горы Эверест» — омоним «вершина», голое «пик» не в noun-led.
+    assert extract_generate_intent("пик горы Эверест") is None
 
 
 def test_generate_skill_match_returns_dict():

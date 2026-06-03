@@ -10,9 +10,8 @@ from app.services.image_search import fetch_image_bytes, find_image_urls
 
 log = logging.getLogger("app")
 
-# Image-noun forms — nominative and accusative, singular and plural. Used both
-# as a marker inside verb-led requests and as the leading token of noun-led
-# requests («фото жвачки по рублю»).
+# Image-noun forms — nominative and accusative, singular and plural. Маркер
+# того, что речь именно о картинке: «найди фото кота», «поищи картинку дракона».
 _IMAGE_NOUNS = (
     r"фото|"
     r"фотку|фотка|фотки|"
@@ -23,9 +22,11 @@ _IMAGE_NOUNS = (
     r"пик"
 )
 
-# Allowed verbs starting an image request.
+# Глаголы ПОИСКА реальной картинки в сети. Только они уходят в DDG-поиск;
+# «покажи/пришли/скинь/нарисуй» и т.п. перехватывает GenerateImageSkill (он
+# в списке SKILLS стоит раньше) и генерирует картинку через Gemini.
 VERB_RE = re.compile(
-    r"^(?:пришли|покажи|покажешь|найди|скинь|кинь|дай|отправь)\s+"
+    r"^(?:найди|найдёшь|найдешь|поищи|поищешь|ищи|загугли|поиск)\s+"
     r"(?:мне\s+)?"
     r"(.+?)[.!?]*\s*$",
     re.IGNORECASE,
@@ -33,15 +34,6 @@ VERB_RE = re.compile(
 
 # Image-noun anywhere in the rest indicates this really is a picture request.
 NOUN_RE = re.compile(rf"\b(?:{_IMAGE_NOUNS})\b", re.IGNORECASE)
-
-# Noun-led request without a verb: «фото жвачки по рублю», «картинку кота».
-# Excludes bare «пик» to avoid false positives like «пик горы Эверест» (info
-# request, not photo). In verb-led variant «пик» остаётся — там явное намерение.
-_LEAD_NOUNS = _IMAGE_NOUNS.replace("|пик", "")
-NOUN_LEAD_RE = re.compile(
-    rf"^(?:{_LEAD_NOUNS})\s+(.+?)[.!?]*\s*$",
-    re.IGNORECASE,
-)
 
 # Punct/spaces to trim from the resulting query.
 EDGE_TRIM = " ,.:;-—\t\n"
@@ -57,7 +49,11 @@ def _safe_filename_stem(query: str) -> str:
 
 
 def extract_image_intent(text: str) -> dict[str, str] | None:
-    """Return {raw, fallback} if the text is an image request, else None.
+    """Return {raw, fallback} if the text is an image SEARCH request, else None.
+
+    Срабатывает только на глаголах поиска (найди/поищи/ищи/загугли/поиск) при
+    наличии слова-маркера картинки. Запросы «нарисуй/покажи/пришли …»
+    обрабатывает GenerateImageSkill — здесь они НЕ матчатся.
 
     `raw`      — the user's wording with the leading verb stripped (good for
                  LLM rewriting).
@@ -68,7 +64,7 @@ def extract_image_intent(text: str) -> dict[str, str] | None:
     """
     stripped = text.strip()
 
-    # Verb-led: «пришли фото кота», «покажи картинку дракона».
+    # «найди фото кота», «поищи картинку дракона».
     m = VERB_RE.match(stripped)
     if m:
         rest = m.group(1).strip()
@@ -79,16 +75,6 @@ def extract_image_intent(text: str) -> dict[str, str] | None:
         if not fallback:
             return None
         return {"raw": rest, "fallback": fallback}
-
-    # Noun-led: «фото жвачки по рублю», «картинку кота» — без глагола.
-    # Бот всё равно вызывается только когда обращены к нему (приват или
-    # «Чат» в группе), так что намерение из контекста ясное.
-    m = NOUN_LEAD_RE.match(stripped)
-    if m:
-        rest = m.group(1).strip(EDGE_TRIM)
-        if not rest:
-            return None
-        return {"raw": stripped, "fallback": rest}
 
     return None
 
