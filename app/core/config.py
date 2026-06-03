@@ -59,9 +59,17 @@ WEB_SESSION_SECRET: str = os.getenv("WEB_SESSION_SECRET", "").strip()
 TELEMT_METRICS_URL: str = os.getenv("TELEMT_METRICS_URL", "").strip()
 
 # Google Gemini API key (aistudio.google.com). Нужен ТОЛЬКО для генерации
-# картинок моделью gemini-3.1-flash-image (Nano Banana) — скилл «нарисуй …».
+# картинок (Nano Banana) — скилл «нарисуй …».
 # Пусто → скилл генерации отвечает понятной ошибкой, остальное работает.
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
+
+# Модель генерации картинок. Безопасно менять ТОЛЬКО на *-image модели Gemini
+# (метод generateContent): gemini-3.1-flash-image, gemini-3-pro-image,
+# gemini-2.5-flash-image. Модели Imagen (imagen-*) НЕ подходят — у них другой
+# эндпоинт (:predict) и формат, наш код их не поймёт. См. .env.example.
+GEMINI_IMAGE_MODEL: str = (
+    os.getenv("GEMINI_IMAGE_MODEL", "").strip() or "gemini-3.1-flash-image"
+)
 
 DEFAULT_QUIZ_QUESTIONS = 5
 MAX_QUIZ_QUESTIONS = 30

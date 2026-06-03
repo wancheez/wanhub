@@ -16,14 +16,17 @@ import logging
 
 import httpx
 
-from app.core.config import GEMINI_API_KEY
+from app.core.config import GEMINI_API_KEY, GEMINI_IMAGE_MODEL
 
 log = logging.getLogger("app")
 
 __all__ = ["generate_image"]
 
-MODEL = "gemini-3.1-flash-image"
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+# Модель задаётся в .env (GEMINI_IMAGE_MODEL); дефолт — gemini-3.1-flash-image.
+API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_IMAGE_MODEL}:generateContent"
+)
 
 # Генерация заметно медленнее поиска картинок: даём щедрый read-таймаут.
 # Картинка обычно готова за 5-15 сек, но cold start бывает дольше.
