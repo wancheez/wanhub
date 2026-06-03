@@ -15,6 +15,7 @@ from typing import Any
 from anthropic import APIError, AsyncAnthropic
 
 from app.prompts import load as load_prompt
+from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
@@ -145,6 +146,7 @@ async def generate_quiz(
 
     questions = _validate_and_parse(parsed, num_questions)
     elapsed = time.monotonic() - t_start
+    log_usage("llm_quiz", response, elapsed)
     log.info(
         "llm_quiz: generated %d questions for topic=%r difficulty=%s in %.2fs",
         len(questions),

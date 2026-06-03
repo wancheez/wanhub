@@ -18,6 +18,7 @@ from typing import Any
 from anthropic import APIError, AsyncAnthropic
 
 from app.prompts import load as load_prompt
+from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
@@ -139,6 +140,7 @@ async def generate_alias(
 
     items = _validate_and_parse(parsed, num)
     elapsed = time.monotonic() - t_start
+    log_usage("alias", response, elapsed)
     log.info(
         "alias: generated %d words schedule=%s in %.2fs",
         len(items),

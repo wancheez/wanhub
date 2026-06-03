@@ -1,9 +1,11 @@
 import random
+import time
 
 import anthropic
 
 from app.prompts import load as load_prompt
 from app.schemas.ascii import AsciiArtResponse
+from app.services.llm_usage import log_usage
 
 MODEL = "claude-haiku-4-5"
 
@@ -73,11 +75,13 @@ def _strip_code_fences(text: str) -> str:
 def generate_ascii_art() -> AsciiArtResponse:
     subject = random.choice(THEMES)
     client = _get_client()
+    t_start = time.monotonic()
     response = client.messages.create(
         model=MODEL,
         max_tokens=1024,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Generate ASCII art of {subject}."}],
     )
+    log_usage("ascii", response, time.monotonic() - t_start)
     text = next((b.text for b in response.content if b.type == "text"), "")
     return AsciiArtResponse(subject=subject, art=_strip_code_fences(text))

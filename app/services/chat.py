@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime
 
 from anthropic import AsyncAnthropic
@@ -11,6 +12,7 @@ from app.services.chat_history import (
     count_messages,
     load_history,
 )
+from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
@@ -77,7 +79,9 @@ def history_size(chat_id: int) -> int:
     return count_messages(chat_id)
 
 
-async def _call_anthropic(history: list[dict], user_message: str, system: str) -> str:
+async def _call_anthropic(
+    history: list[dict], user_message: str, system: str, op: str = "chat"
+) -> str:
     """Run a server-side tool loop until Claude is done; return concatenated text.
 
     Shared by the Telegram and web chat services. Caller is responsible for
@@ -87,6 +91,7 @@ async def _call_anthropic(history: list[dict], user_message: str, system: str) -
     client = _get_client()
 
     for _ in range(MAX_PAUSE_TURN_ITERATIONS):
+        t_start = time.monotonic()
         async with client.messages.stream(
             model=CHAT_MODEL,
             max_tokens=MAX_TOKENS,
@@ -95,6 +100,9 @@ async def _call_anthropic(history: list[dict], user_message: str, system: str) -
             tools=TOOLS,  # type: ignore[arg-type]
         ) as stream:
             response = await stream.get_final_message()
+        # Логируем КАЖДУЮ итерацию: при pause_turn (web_search) их несколько,
+        # у каждой свой usage.
+        log_usage(op, response, time.monotonic() - t_start)
 
         if response.stop_reason != "pause_turn":
             break

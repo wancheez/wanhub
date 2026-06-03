@@ -14,6 +14,7 @@ from typing import Any
 from anthropic import APIError, AsyncAnthropic
 
 from app.prompts import load as load_prompt
+from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
@@ -134,6 +135,7 @@ async def generate_riddles(
 
     riddles = _validate_and_parse(parsed, num)
     elapsed = time.monotonic() - t_start
+    log_usage("riddles", response, elapsed)
     log.info(
         "riddles: generated %d riddles difficulty=%s in %.2fs",
         len(riddles),

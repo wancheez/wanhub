@@ -19,6 +19,7 @@ import time
 from anthropic import APIError, AsyncAnthropic
 
 from app.prompts import load as load_prompt
+from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
@@ -307,6 +308,7 @@ async def banker_line(
         if len(line) > MAX_LINE_CHARS:
             line = line[:MAX_LINE_CHARS].rstrip() + "…"
         elapsed = time.monotonic() - t_start
+        log_usage("deal_banker", response, elapsed)
         log.info("deal_banker_voice: cat=%s offer=%d in %.2fs", category, offer, elapsed)
         return line
     except (APIError, TimeoutError, BankerVoiceFailed, ValueError) as e:

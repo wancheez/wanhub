@@ -1,8 +1,10 @@
 import logging
+import time
 
 from anthropic import AsyncAnthropic
 
 from app.prompts import load as load_prompt
+from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
@@ -32,6 +34,7 @@ async def rewrite_query(user_text: str, fallback: str) -> str:
 
     try:
         client = _get_client()
+        t_start = time.monotonic()
         async with client.messages.stream(
             model=REWRITE_MODEL,
             max_tokens=REWRITE_MAX_TOKENS,
@@ -39,6 +42,7 @@ async def rewrite_query(user_text: str, fallback: str) -> str:
             messages=[{"role": "user", "content": user_text}],
         ) as stream:
             response = await stream.get_final_message()
+        log_usage("image_query", response, time.monotonic() - t_start)
     except Exception:
         log.exception("rewrite_query failed for %r — using fallback", user_text)
         return fallback
