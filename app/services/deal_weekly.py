@@ -28,6 +28,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile
 
 from app.services import deal_db
+from app.services.avatars import fetch_avatars
 from app.services.podium import PodiumEntry, render_podium
 
 log = logging.getLogger("app")
@@ -234,7 +235,8 @@ def compose_summary(
 _CAPTION_MAX = 1000
 
 
-def render_summary_podium(
+async def render_summary_podium(
+    bot: Bot,
     chat_id: int,
     start_utc: datetime,
     end_utc: datetime,
@@ -245,7 +247,8 @@ def render_summary_podium(
 
     Топ берём тот же, что и текст саммари (по среднему, мин. MIN_GAMES_FOR_AVG).
     Если призёров нет (была только «лучшая партия» без 3+ игр у кого-либо) —
-    None, и отправка откатится на обычный текст.
+    None, и отправка откатится на обычный текст. Аватарки тянем из Telegram;
+    у кого фото нет — медальон рисуется из инициалов.
     """
     top = deal_db.top_for_chat_avg(
         chat_id,
@@ -267,11 +270,13 @@ def render_summary_podium(
         if kind == "weekly"
         else f"Поздравляем {champion}!"
     )
+    avatars = await fetch_avatars(bot, [r.user_id for r in top])
     entries = [
         PodiumEntry(
             name=r.user_name,
             value=f"avg {_fmt_rub(r.avg_per_game)}",
             sub=f"{r.games} игр",
+            avatar=avatars.get(r.user_id),
         )
         for r in top
     ]
@@ -334,7 +339,7 @@ async def post_weekly(bot: Bot, end_utc: datetime) -> int:
         if text is None:
             # У этого чата был ad-hoc, и после него никто не сыграл — нечего показать.
             continue
-        image = render_summary_podium(chat_id, start_utc, end_utc, kind="weekly")
+        image = await render_summary_podium(bot, chat_id, start_utc, end_utc, kind="weekly")
         try:
             await _send_summary(bot, chat_id, text, image)
             sent += 1
@@ -374,7 +379,7 @@ async def post_adhoc(bot: Bot, chat_id: int, end_utc: datetime) -> int:
             end_iso,
         )
         return 0
-    image = render_summary_podium(chat_id, start_utc, end_utc, kind="adhoc")
+    image = await render_summary_podium(bot, chat_id, start_utc, end_utc, kind="adhoc")
     try:
         await _send_summary(bot, chat_id, text, image)
         log.info("deal_weekly: adhoc posted to chat=%d; end=%s", chat_id, end_iso)

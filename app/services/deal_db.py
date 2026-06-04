@@ -48,6 +48,7 @@ class DealStatsDBUnavailable(Exception):
 
 @dataclass(frozen=True)
 class LeaderRow:
+    user_id: int
     user_name: str
     best: int
     total: int
@@ -266,6 +267,7 @@ def top_for_chat(chat_id: int, limit: int = 20) -> list[LeaderRow]:
                 GROUP BY user_id
             )
             SELECT
+                agg.user_id,
                 (SELECT user_name FROM outcomes o
                   WHERE o.chat_id = ?
                     AND o.user_id = agg.user_id
@@ -284,6 +286,7 @@ def top_for_chat(chat_id: int, limit: int = 20) -> list[LeaderRow]:
         return []
     return [
         LeaderRow(
+            user_id=int(r["user_id"]),
             user_name=r["user_name"] or "?",
             best=int(r["best"]),
             total=int(r["total"]),
@@ -348,6 +351,7 @@ def top_for_chat_avg(
                 HAVING games >= ?
             )
             SELECT
+                agg.user_id,
                 (SELECT user_name FROM outcomes o
                   WHERE o.chat_id = ?
                     AND o.user_id = agg.user_id
@@ -366,6 +370,7 @@ def top_for_chat_avg(
         return []
     return [
         LeaderRow(
+            user_id=int(r["user_id"]),
             user_name=r["user_name"] or "?",
             best=int(r["best"]),
             total=int(r["total"]),

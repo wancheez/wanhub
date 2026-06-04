@@ -45,6 +45,7 @@ from app.services import (
     deal_weekly,
     games,
 )
+from app.services.avatars import fetch_avatars
 from app.services.podium import PodiumEntry, render_podium
 
 router = Router(name="deal")
@@ -861,13 +862,20 @@ def _podium_sub(p: deal.PlayerState) -> str:
     return ""
 
 
-def _render_game_podium(session: deal.DealSession) -> bytes | None:
+def _render_game_podium(
+    session: deal.DealSession, avatars: dict[int, bytes | None]
+) -> bytes | None:
     """Пьедестал по топ-3 выигрышам партии. None — нет игроков или сбой рендера."""
     rows = [p for p in _ranked_players(session) if p.status in ("dealt", "won_final")]
     if not rows:
         return None
     entries = [
-        PodiumEntry(name=p.name, value=_fmt_rub(p.winnings), sub=_podium_sub(p))
+        PodiumEntry(
+            name=p.name,
+            value=_fmt_rub(p.winnings),
+            sub=_podium_sub(p),
+            avatar=avatars.get(p.user_id),
+        )
         for p in rows[:3]
     ]
     try:
@@ -1387,7 +1395,12 @@ async def cmd_dealtop(message: Message) -> None:
             f"{r.games} партий · total {_fmt_rub(r.total)}"
         )
     text = "\n".join(lines)
-    image = _render_dealtop_podium(rows, period)
+    avatars = (
+        await fetch_avatars(message.bot, [r.user_id for r in rows[:3]])
+        if message.bot is not None
+        else {}
+    )
+    image = _render_dealtop_podium(rows, period, avatars)
     if image is None:
         await message.answer(text, parse_mode="HTML")
         return
@@ -1401,13 +1414,16 @@ async def cmd_dealtop(message: Message) -> None:
         await message.answer(text, parse_mode="HTML")
 
 
-def _render_dealtop_podium(rows: list[deal_db.LeaderRow], period: str) -> bytes | None:
+def _render_dealtop_podium(
+    rows: list[deal_db.LeaderRow], period: str, avatars: dict[int, bytes | None]
+) -> bytes | None:
     """Пьедестал по топ-3 для /dealtop. None при сбое рендера (откат на текст)."""
     entries = [
         PodiumEntry(
             name=r.user_name,
             value=f"avg {_fmt_rub(r.avg_per_game)}",
             sub=f"{r.games} партий",
+            avatar=avatars.get(r.user_id),
         )
         for r in rows[:3]
     ]
@@ -1957,7 +1973,17 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
         # Сначала фото-пьедестал с короткой подписью (шапка + топ-3), затем
         # подробный текстовый разбор отдельным сообщением. Рендер не должен
         # ронять финал: при сбое (image=None) просто пропускаем картинку.
-        image = _render_game_podium(session)
+        top_uids = [
+            p.user_id
+            for p in _ranked_players(session)
+            if p.status in ("dealt", "won_final")
+        ][:3]
+        avatars = (
+            await fetch_avatars(message.bot, top_uids)
+            if message.bot is not None and top_uids
+            else {}
+        )
+        image = _render_game_podium(session, avatars)
         if image is not None:
             try:
                 await message.answer_photo(

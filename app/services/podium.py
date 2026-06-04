@@ -54,11 +54,16 @@ _SLOT_ORDER = (1, 0, 2)  # слева 2-е место, по центру 1-е, �
 
 @dataclass(frozen=True)
 class PodiumEntry:
-    """Одна строка пьедестала. value — главная метрика, sub — подпись под ней."""
+    """Одна строка пьедестала. value — главная метрика, sub — подпись под ней.
+
+    avatar — байты фото профиля (любой формат, который читает Pillow). Если
+    None или картинка битая, медальон рисуется из инициалов имени.
+    """
 
     name: str
     value: str
     sub: str | None = None
+    avatar: bytes | None = None
 
 
 # --- Шрифты ------------------------------------------------------------------
@@ -132,24 +137,52 @@ def _initials(name: str) -> str:
     return (parts[0][0] + parts[1][0]).upper()
 
 
-def _draw_medallion(
-    img: Image.Image, center: tuple[int, int], rank: int, name: str
-) -> None:
-    """Кружок-аватар с инициалами и цветной обводкой по медали места.
+def _load_avatar(data: bytes, diameter: int) -> Image.Image | None:
+    """Декодировать фото, центрированно обрезать в квадрат и масштабировать.
 
-    Чтобы прикрутить реальные фото Telegram: вместо заливки инициалами вставить
-    сюда `img.paste(avatar.resize(...), box, mask=circle_mask)`.
+    None если байты не открылись как картинка — вызывающий откатится на инициалы.
+    """
+    try:
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        log.info("podium: bad avatar bytes — fallback to initials")
+        return None
+    w, h = im.size
+    side = min(w, h)
+    left = (w - side) // 2
+    top = (h - side) // 2
+    im = im.crop((left, top, left + side, top + side))
+    return im.resize((diameter, diameter), Image.Resampling.LANCZOS)
+
+
+def _draw_medallion(
+    img: Image.Image, center: tuple[int, int], rank: int, entry: PodiumEntry
+) -> None:
+    """Кружок-аватар с цветной обводкой по медали места.
+
+    Если у записи есть валидное фото — кладём его круглым кропом, иначе рисуем
+    инициалы на тёмном круге.
     """
     cx, cy = center
     r = _MEDALLION_R
     draw = ImageDraw.Draw(img)
     box = (cx - r, cy - r, cx + r, cy + r)
-    # Обводка-кольцо цветом медали, внутри — тёмный круг с инициалами.
+    # Обводка-кольцо цветом медали.
     draw.ellipse(box, fill=_MEDAL[rank])
-    inner = (cx - r + 7, cy - r + 7, cx + r - 7, cy + r - 7)
+
+    inner_r = r - 7
+    diameter = inner_r * 2
+    avatar = _load_avatar(entry.avatar, diameter) if entry.avatar else None
+    if avatar is not None:
+        # Круглая маска по размеру фото — вставляем поверх кольца.
+        mask = Image.new("L", (diameter, diameter), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, diameter - 1, diameter - 1), fill=255)
+        img.paste(avatar, (cx - inner_r, cy - inner_r), mask)
+        return
+    # Фолбэк: тёмный круг + инициалы цветом медали.
+    inner = (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r)
     draw.ellipse(inner, fill=(22, 26, 44))
-    text = _initials(name)
-    draw.text((cx, cy), text, font=_font(46, bold=True), fill=_MEDAL[rank], anchor="mm")
+    draw.text((cx, cy), _initials(entry.name), font=_font(46, bold=True), fill=_MEDAL[rank], anchor="mm")
 
 
 def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> None:
@@ -202,7 +235,7 @@ def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> N
     name = _fit_text(draw, entry.name, _font(28, bold=True), _BAR_W + 4)
     draw.text((cx, name_y), name, font=_font(28, bold=True), fill=_NAME, anchor="mm")
 
-    _draw_medallion(img, (cx, med_cy), rank, entry.name)
+    _draw_medallion(img, (cx, med_cy), rank, entry)
 
 
 def render_podium(
