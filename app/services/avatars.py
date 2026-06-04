@@ -26,11 +26,15 @@ async def fetch_avatar(bot: Bot, user_id: int) -> bytes | None:
     try:
         photos = await bot.get_user_profile_photos(user_id, limit=1)
         if not photos.photos or not photos.photos[0]:
-            return None  # фото нет или скрыто настройками приватности
+            # Пустой ответ = фото нет ИЛИ оно скрыто приватностью «Фото профиля»
+            # (не контакт → бот его не видит). Самая частая причина инициалов.
+            log.info("avatars: no profile photo for user=%d (none or privacy)", user_id)
+            return None
         sizes = photos.photos[0]
         chosen = next((s for s in sizes if s.width >= _MIN_SIZE), sizes[-1])
         file = await bot.get_file(chosen.file_id)
         if file.file_path is None:
+            log.info("avatars: empty file_path for user=%d", user_id)
             return None
         buf = io.BytesIO()
         await bot.download_file(file.file_path, buf)
