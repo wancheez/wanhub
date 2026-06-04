@@ -28,6 +28,7 @@ from aiogram.exceptions import (
 )
 from aiogram.filters import Command
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -44,6 +45,7 @@ from app.services import (
     deal_weekly,
     games,
 )
+from app.services.podium import PodiumEntry, render_podium
 
 router = Router(name="deal")
 log = logging.getLogger("app")
@@ -772,7 +774,13 @@ def _what_if_line(session: deal.DealSession, p: deal.PlayerState) -> str | None:
     return None
 
 
-def _text_end_summary(session: deal.DealSession) -> str:
+def _ranked_players(session: deal.DealSession) -> list[deal.PlayerState]:
+    """Игроки партии по убыванию выигрыша (тай-брейк по имени)."""
+    return sorted(session.players.values(), key=lambda p: (-p.winnings, p.name.lower()))
+
+
+def _end_header_lines(session: deal.DealSession) -> list[str]:
+    """Шапка итогов: «Игра окончена», личный кейс и кейс со стола."""
     personal = (
         session.case_values.get(session.personal_case_id)
         if session.personal_case_id is not None
@@ -794,26 +802,33 @@ def _text_end_summary(session: deal.DealSession) -> str:
             f"На столе оставался {_case_emoji(session.final_table_case_id)}: "
             f"<b>{_fmt_rub(table_value)}</b>"
         )
-    lines.append("")
-    rows = sorted(
-        session.players.values(),
-        key=lambda p: (-p.winnings, p.name.lower()),
-    )
+    return lines
+
+
+def _player_comment(p: deal.PlayerState) -> str:
+    """Развёрнутый комментарий «как закончил» для текстовых итогов."""
+    if p.status == "dealt":
+        return f"взял сделку в р. {(p.deal_round_idx or 0) + 1}"
+    if p.status == "won_final":
+        if p.swap_kept is True:
+            return "дошёл до финала · оставил личный"
+        if p.swap_kept is False:
+            return "дошёл до финала · поменял"
+        return "дошёл до финала"
+    return "не сыграл"
+
+
+def _player_line(i: int, p: deal.PlayerState) -> str:
     medals = ["🥇", "🥈", "🥉"]
-    for i, p in enumerate(rows):
-        prefix = medals[i] if i < len(medals) else "  "
-        if p.status == "dealt":
-            comment = f"взял сделку в р. {(p.deal_round_idx or 0) + 1}"
-        elif p.status == "won_final":
-            if p.swap_kept is True:
-                comment = "дошёл до финала · оставил личный"
-            elif p.swap_kept is False:
-                comment = "дошёл до финала · поменял"
-            else:
-                comment = "дошёл до финала"
-        else:
-            comment = "не сыграл"
-        lines.append(f"{prefix} <b>{escape(p.name)}</b> — {_fmt_rub(p.winnings)} · {comment}")
+    prefix = medals[i] if i < len(medals) else "  "
+    return f"{prefix} <b>{escape(p.name)}</b> — {_fmt_rub(p.winnings)} · {_player_comment(p)}"
+
+
+def _text_end_summary(session: deal.DealSession) -> str:
+    lines = _end_header_lines(session)
+    lines.append("")
+    for i, p in enumerate(_ranked_players(session)):
+        lines.append(_player_line(i, p))
         wif = _what_if_line(session, p)
         if wif is not None:
             lines.append(wif)
@@ -822,6 +837,49 @@ def _text_end_summary(session: deal.DealSession) -> str:
     lines.append("")
     lines.append("🎲 Ещё партию — /deal · 🏆 топ недели — /dealtop")
     return "\n".join(lines)
+
+
+def _podium_caption(session: deal.DealSession) -> str:
+    """Короткая подпись к фото-пьедесталу: шапка + топ-3 без «что если бы»."""
+    lines = _end_header_lines(session)
+    lines.append("")
+    for i, p in enumerate(_ranked_players(session)[:3]):
+        lines.append(_player_line(i, p))
+    return "\n".join(lines)
+
+
+def _podium_sub(p: deal.PlayerState) -> str:
+    """Короткая подпись игрока на тумбе (помещается под значением)."""
+    if p.status == "dealt":
+        return f"сделка р. {(p.deal_round_idx or 0) + 1}"
+    if p.status == "won_final":
+        if p.swap_kept is True:
+            return "финал · оставил"
+        if p.swap_kept is False:
+            return "финал · поменял"
+        return "финал"
+    return ""
+
+
+def _render_game_podium(session: deal.DealSession) -> bytes | None:
+    """Пьедестал по топ-3 выигрышам партии. None — нет игроков или сбой рендера."""
+    rows = [p for p in _ranked_players(session) if p.status in ("dealt", "won_final")]
+    if not rows:
+        return None
+    entries = [
+        PodiumEntry(name=p.name, value=_fmt_rub(p.winnings), sub=_podium_sub(p))
+        for p in rows[:3]
+    ]
+    try:
+        return render_podium(
+            entries,
+            title="Сделка или нет — итоги партии",
+            period=f"{session.case_count or 0} кейсов",
+            footer=f"Победитель партии — {rows[0].name}",
+        )
+    except Exception:
+        log.exception("deal: game podium render failed for chat=%d", session.chat_id)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1328,7 +1386,36 @@ async def cmd_dealtop(message: Message) -> None:
             f"best {_fmt_rub(r.best)} · "
             f"{r.games} партий · total {_fmt_rub(r.total)}"
         )
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    text = "\n".join(lines)
+    image = _render_dealtop_podium(rows, period)
+    if image is None:
+        await message.answer(text, parse_mode="HTML")
+        return
+    photo = BufferedInputFile(image, filename="dealtop.png")
+    # Полный список (4+ игроков) длиннее лимита подписи — тогда фото и текст
+    # раздельно. Топ-3 умещается в подпись и идёт одним сообщением.
+    if len(text) <= 1000:
+        await message.answer_photo(photo, caption=text, parse_mode="HTML")
+    else:
+        await message.answer_photo(photo)
+        await message.answer(text, parse_mode="HTML")
+
+
+def _render_dealtop_podium(rows: list[deal_db.LeaderRow], period: str) -> bytes | None:
+    """Пьедестал по топ-3 для /dealtop. None при сбое рендера (откат на текст)."""
+    entries = [
+        PodiumEntry(
+            name=r.user_name,
+            value=f"avg {_fmt_rub(r.avg_per_game)}",
+            sub=f"{r.games} партий",
+        )
+        for r in rows[:3]
+    ]
+    try:
+        return render_podium(entries, title="Топ периода «Сделка»", period=period)
+    except Exception:
+        log.exception("dealtop: podium render failed")
+        return None
 
 
 @router.message(Command("dealsummary"))
@@ -1867,6 +1954,19 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
 
         await _drama_replay(message, session)
 
+        # Сначала фото-пьедестал с короткой подписью (шапка + топ-3), затем
+        # подробный текстовый разбор отдельным сообщением. Рендер не должен
+        # ронять финал: при сбое (image=None) просто пропускаем картинку.
+        image = _render_game_podium(session)
+        if image is not None:
+            try:
+                await message.answer_photo(
+                    BufferedInputFile(image, filename="game.png"),
+                    caption=_podium_caption(session),
+                    parse_mode="HTML",
+                )
+            except TelegramAPIError:
+                log.exception("deal: failed to send game podium for chat=%d", session.chat_id)
         summary = _text_end_summary(session)
         try:
             await message.answer(summary, parse_mode="HTML")

@@ -25,8 +25,10 @@ from typing import Literal
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BufferedInputFile
 
 from app.services import deal_db
+from app.services.podium import PodiumEntry, render_podium
 
 log = logging.getLogger("app")
 
@@ -42,6 +44,7 @@ __all__ = [
     "post_adhoc",
     "post_weekly",
     "previous_summary_boundary_utc",
+    "render_summary_podium",
     "weekly_summary_loop",
 ]
 
@@ -226,6 +229,81 @@ def compose_summary(
     return "\n".join(lines)
 
 
+# Запас под лимит подписи к фото в Telegram (формально 1024). HTML-теги
+# Telegram при подсчёте не учитывает, но держим headroom на всякий случай.
+_CAPTION_MAX = 1000
+
+
+def render_summary_podium(
+    chat_id: int,
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    kind: SummaryKind,
+) -> bytes | None:
+    """PNG-пьедестал по топ-3 за окно. None — нет топа (мало партий) или сбой.
+
+    Топ берём тот же, что и текст саммари (по среднему, мин. MIN_GAMES_FOR_AVG).
+    Если призёров нет (была только «лучшая партия» без 3+ игр у кого-либо) —
+    None, и отправка откатится на обычный текст.
+    """
+    top = deal_db.top_for_chat_avg(
+        chat_id,
+        iso_utc(start_utc),
+        iso_utc(end_utc),
+        min_games=MIN_GAMES_FOR_AVG,
+        limit=TOP_LIMIT,
+    )
+    if not top:
+        return None
+    champion = top[0].user_name
+    title = (
+        "Итоги недели «Сделка или нет»"
+        if kind == "weekly"
+        else "Промежуточные итоги «Сделка»"
+    )
+    footer = (
+        f"Поздравляем {champion} с победой!"
+        if kind == "weekly"
+        else f"Поздравляем {champion}!"
+    )
+    entries = [
+        PodiumEntry(
+            name=r.user_name,
+            value=f"avg {_fmt_rub(r.avg_per_game)}",
+            sub=f"{r.games} игр",
+        )
+        for r in top
+    ]
+    try:
+        return render_podium(
+            entries,
+            title=title,
+            period=_format_msk_range(start_utc, end_utc),
+            footer=footer,
+        )
+    except Exception:
+        # Рендер не должен ронять рассылку итогов — откатимся на текст.
+        log.exception("deal_weekly: podium render failed for chat=%d", chat_id)
+        return None
+
+
+async def _send_summary(bot: Bot, chat_id: int, text: str, image: bytes | None) -> None:
+    """Отправить саммари: картинкой с подписью, либо текстом, если картинки нет.
+
+    Если текст не влезает в подпись к фото — шлём фото и текст раздельно.
+    """
+    if image is None:
+        await bot.send_message(chat_id, text, parse_mode="HTML")
+        return
+    photo = BufferedInputFile(image, filename="podium.png")
+    if len(text) <= _CAPTION_MAX:
+        await bot.send_photo(chat_id, photo, caption=text, parse_mode="HTML")
+    else:
+        await bot.send_photo(chat_id, photo)
+        await bot.send_message(chat_id, text, parse_mode="HTML")
+
+
 async def post_weekly(bot: Bot, end_utc: datetime) -> int:
     """Закрепить плановую границу и разослать саммари по всем чатам с играми.
 
@@ -256,8 +334,9 @@ async def post_weekly(bot: Bot, end_utc: datetime) -> int:
         if text is None:
             # У этого чата был ad-hoc, и после него никто не сыграл — нечего показать.
             continue
+        image = render_summary_podium(chat_id, start_utc, end_utc, kind="weekly")
         try:
-            await bot.send_message(chat_id, text, parse_mode="HTML")
+            await _send_summary(bot, chat_id, text, image)
             sent += 1
         except TelegramAPIError as e:
             log.warning("deal_weekly: weekly send to chat=%d failed (%s)", chat_id, e)
@@ -295,8 +374,9 @@ async def post_adhoc(bot: Bot, chat_id: int, end_utc: datetime) -> int:
             end_iso,
         )
         return 0
+    image = render_summary_podium(chat_id, start_utc, end_utc, kind="adhoc")
     try:
-        await bot.send_message(chat_id, text, parse_mode="HTML")
+        await _send_summary(bot, chat_id, text, image)
         log.info("deal_weekly: adhoc posted to chat=%d; end=%s", chat_id, end_iso)
         return 1
     except TelegramAPIError as e:
