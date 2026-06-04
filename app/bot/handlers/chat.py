@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from app.bot.format import for_telegram
 from app.bot.skills import try_skills
+from app.bot.skills.generate_image import resolve_generation_with_reply
 from app.services.chat import chat, reset_chat
 from app.services.image_generate import edit_image
 
@@ -198,6 +199,9 @@ async def _route(message: Message, text: str, state: FSMContext) -> None:
     # Ответ на фото с инструкцией — это правка картинки, а не текстовый чат.
     if await _try_edit_replied_photo(message, text):
         return
+    # Реплай на текст с запросом картинки: «сгенерируй» / «сгенерируй это» →
+    # подставляем текст родителя как объект генерации.
+    text = resolve_generation_with_reply(text, message)
     if await try_skills(message, text, state):
         return
     await _do_chat(message, text)

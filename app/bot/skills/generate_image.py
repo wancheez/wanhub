@@ -14,13 +14,12 @@ log = logging.getLogger("app")
 # уходят ТОЛЬКО найди/поищи/ищи/загугли/поиск (см. send_image) — они здесь
 # намеренно отсутствуют. «покажи» не используем: слишком широкий («покажи
 # погоду/меню»). GenerateImageSkill стоит в SKILLS раньше SendImageSkill.
-GEN_RE = re.compile(
-    r"^(?:"
+_GEN_VERBS = (
     r"нарисуй|нарисуй-ка|сгенерируй|сгенерируй-ка|сгенери|придумай|"
     r"пришли|скинь|кинь|дай|отправь"
-    r")\s+"
-    r"(?:мне\s+)?"
-    r"(.+?)[.!?]*\s*$",
+)
+GEN_RE = re.compile(
+    rf"^(?:{_GEN_VERBS})\s+(?:мне\s+)?(.+?)[.!?]*\s*$",
     re.IGNORECASE,
 )
 
@@ -38,6 +37,14 @@ _IMAGE_NOUNS = (
 LEADING_NOUN_RE = re.compile(rf"^(?:{_IMAGE_NOUNS}|пик)\s+", re.IGNORECASE)
 NOUN_LEAD_RE = re.compile(rf"^(?:{_IMAGE_NOUNS})\s+(.+?)[.!?]*\s*$", re.IGNORECASE)
 
+# Голый глагол без объекта: «сгенерируй», «нарисуй картинку». Сам по себе это не
+# запрос (объекта нет, GEN_RE не матчит — пусть Claude уточняет), но при реплае
+# на текст объект берём из родителя: «сгенерируй» + «кот» → «сгенерируй кот».
+BARE_GEN_RE = re.compile(
+    rf"^(?:{_GEN_VERBS})(?:\s+(?:мне\s+)?(?:{_IMAGE_NOUNS}|пик))?[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 EDGE_TRIM = " ,.:;-—\t\n"
 
 # Telegram caption limit — 1024; промпты короче, режем с запасом.
@@ -53,22 +60,33 @@ DEICTIC_RE = re.compile(
 REFERENT_MAX = 300
 
 
-def _resolve_reply_reference(prompt: str, message: Message) -> str:
-    """Если сообщение — реплай на текст, подставить текст родителя вместо «это».
-
-    «сгенерируй это» (реплай на «кот») → «кот». «нарисуй это акварелью» →
-    «кот акварелью». Если в промпте нет указательного слова — оставляем как есть,
-    чтобы не подмешивать чужой текст в явный запрос.
-    """
+def _reply_referent(message: Message) -> str:
+    """Текст родительского сообщения при реплае, обрезанный до REFERENT_MAX."""
     replied = message.reply_to_message
     if replied is None:
-        return prompt
+        return ""
     referent = (replied.text or replied.caption or "").strip(EDGE_TRIM)
+    return referent[:REFERENT_MAX]
+
+
+def resolve_generation_with_reply(text: str, message: Message) -> str:
+    """Дополнить запрос генерации текстом родителя при реплае.
+
+    Применяется только к похожему на запрос картинки тексту, поэтому обычные
+    сообщения не трогаем:
+      «сгенерируй» (реплай на «кот») → «сгенерируй кот» (голый глагол + объект);
+      «сгенерируй это» / «нарисуй это акварелью» → подмена «это» на текст родителя.
+    Если дополнять нечем (нет реплая/текста) — возвращаем text как есть.
+    """
+    referent = _reply_referent(message)
     if not referent:
-        return prompt
-    referent = referent[:REFERENT_MAX]
-    resolved = DEICTIC_RE.sub(referent, prompt, count=1).strip(EDGE_TRIM)
-    return resolved or referent
+        return text
+    stripped = text.strip()
+    if BARE_GEN_RE.match(stripped):
+        return f"{stripped} {referent}"
+    if extract_generate_intent(stripped) is not None:
+        return DEICTIC_RE.sub(referent, text, count=1)
+    return text
 
 
 def extract_generate_intent(text: str) -> dict[str, str] | None:
@@ -111,7 +129,7 @@ class GenerateImageSkill:
 
     async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
         _ = state  # not used; FSM is wired only for skills that need it
-        prompt: str = _resolve_reply_reference(params["prompt"], message)
+        prompt: str = params["prompt"]
 
         assert message.bot is not None  # aiogram populates this for incoming updates
         await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
