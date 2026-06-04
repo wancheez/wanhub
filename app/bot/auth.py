@@ -5,11 +5,33 @@ from typing import Any
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import CallbackQuery, Chat, Message, TelegramObject, User
 
+from app.bot.handlers.chat import CHAT_PREFIX_RE
 from app.bot.notify import notify_admin_of_new_chat
 from app.bot.userfmt import event_summary, fmt_user
 from app.services import chat_whitelist
 
 log = logging.getLogger("app")
+
+
+def _is_addressed_to_bot(event: TelegramObject) -> bool:
+    """Адресовано ли сообщение боту — для access-лога.
+
+    Callback'и всегда наши (это кнопки бота). В личке боту адресовано всё. В
+    группе бот реагирует только на команды, префикс «Чат …» и реплаи на свои
+    сообщения (ответы в загадках/алиасе, правка фото по реплаю) — остальную
+    болтовню чата не логируем.
+    """
+    if isinstance(event, CallbackQuery):
+        return True
+    if not isinstance(event, Message):
+        return False
+    if event.chat.type == "private":
+        return True
+    text = event.text or event.caption or ""
+    if text.startswith("/") or CHAT_PREFIX_RE.match(text):
+        return True
+    replied = event.reply_to_message
+    return replied is not None and replied.from_user is not None and replied.from_user.is_bot
 
 
 class ChatWhitelistMiddleware(BaseMiddleware):
@@ -32,22 +54,24 @@ class ChatWhitelistMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        # Сквозной access-лог: одна строка на каждый входящий апдейт (до гейта),
-        # чтобы по логам было видно, кто и что присылал — даже если апдейт потом
-        # отсекли. chat_id для callback берём из вложенного сообщения.
-        acc_user: User | None = getattr(event, "from_user", None)
-        if isinstance(event, CallbackQuery):
-            acc_msg = event.message
-            acc_chat_id = acc_msg.chat.id if isinstance(acc_msg, Message) else None
-        else:
-            acc_chat = getattr(event, "chat", None)
-            acc_chat_id = acc_chat.id if acc_chat is not None else None
-        log.info(
-            "update chat=%s from %s: %s",
-            acc_chat_id,
-            fmt_user(acc_user),
-            event_summary(event),
-        )
+        # Сквозной access-лог только для апдейтов, адресованных боту (в группе
+        # это команды, префикс «Чат …» и реплаи на сообщения бота) — обычную
+        # болтовню чата не пишем. chat_id для callback берём из вложенного
+        # сообщения.
+        if _is_addressed_to_bot(event):
+            acc_user: User | None = getattr(event, "from_user", None)
+            if isinstance(event, CallbackQuery):
+                acc_msg = event.message
+                acc_chat_id = acc_msg.chat.id if isinstance(acc_msg, Message) else None
+            else:
+                acc_chat = getattr(event, "chat", None)
+                acc_chat_id = acc_chat.id if acc_chat is not None else None
+            log.info(
+                "update chat=%s from %s: %s",
+                acc_chat_id,
+                fmt_user(acc_user),
+                event_summary(event),
+            )
 
         # CallbackQuery has no top-level `chat` — pull it from the attached
         # message and gate by the same chat-whitelist rules as messages, so
