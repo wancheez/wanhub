@@ -67,9 +67,7 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
 # (метод generateContent): gemini-3.1-flash-image, gemini-3-pro-image,
 # gemini-2.5-flash-image. Модели Imagen (imagen-*) НЕ подходят — у них другой
 # эндпоинт (:predict) и формат, наш код их не поймёт. См. .env.example.
-GEMINI_IMAGE_MODEL: str = (
-    os.getenv("GEMINI_IMAGE_MODEL", "").strip() or "gemini-3.1-flash-image"
-)
+GEMINI_IMAGE_MODEL: str = os.getenv("GEMINI_IMAGE_MODEL", "").strip() or "gemini-3.1-flash-image"
 
 DEFAULT_QUIZ_QUESTIONS = 5
 MAX_QUIZ_QUESTIONS = 30

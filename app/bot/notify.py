@@ -41,8 +41,22 @@ def _admin_text(chat: Chat, user: User | None) -> str:
         f"chat_id: <code>{chat.id}</code>",
     ]
     if user is not None:
-        who = escape(user.full_name or user.username or str(user.id))
-        parts.append(f"От: <b>{who}</b> (user_id <code>{user.id}</code>)")
+        # Имя кликабельное (tg://user?id=) — из лички админ сразу откроет профиль.
+        name = escape(user.full_name or user.username or str(user.id))
+        parts.append(f'От: <a href="tg://user?id={user.id}">{name}</a>')
+        if user.username:
+            parts.append(f"Username: @{escape(user.username)}")
+        parts.append(f"user_id: <code>{user.id}</code>")
+        # Доп. признаки показываем только когда они есть, чтобы не плодить пустые строки.
+        flags = []
+        if user.language_code:
+            flags.append(f"язык {escape(user.language_code)}")
+        if user.is_premium:
+            flags.append("premium")
+        if user.is_bot:
+            flags.append("бот")
+        if flags:
+            parts.append("· " + ", ".join(flags))
     return "\n".join(parts)
 
 

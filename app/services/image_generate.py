@@ -33,8 +33,7 @@ __all__ = ["edit_image", "generate_image"]
 
 # Модель задаётся в .env (GEMINI_IMAGE_MODEL); дефолт — gemini-3.1-flash-image.
 API_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_IMAGE_MODEL}:generateContent"
+    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
 )
 
 # Генерация заметно медленнее поиска картинок: даём щедрый read-таймаут.

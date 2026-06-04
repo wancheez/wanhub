@@ -9,6 +9,7 @@ from app.bot.handlers import (
     device,
     games,
     llm_quiz,
+    logs,
     movie,
     riddles,
     show,
@@ -20,6 +21,7 @@ from app.bot.handlers import ascii as ascii_handlers
 
 def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(admin.router)  # my_chat_member + approve/deny callbacks
+    dp.include_router(logs.router)  # /logs — только админ, только в личке
     dp.include_router(start.router)
     dp.include_router(device.router)
     dp.include_router(telemt.router)
