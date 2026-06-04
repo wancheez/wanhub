@@ -43,6 +43,33 @@ EDGE_TRIM = " ,.:;-—\t\n"
 # Telegram caption limit — 1024; промпты короче, режем с запасом.
 CAPTION_MAX = 200
 
+# Указательные слова, которые в реплае ссылаются на текст родительского
+# сообщения: «сгенерируй это», «нарисуй то акварелью». Подменяем их на сам текст
+# родителя. Длину референта ограничиваем, чтобы простыня в промпт не уехала.
+DEICTIC_RE = re.compile(
+    r"\b(?:вот\s+это|это\s+самое|это(?:го)?|то(?:го)?|его|её|ее|их)\b",
+    re.IGNORECASE,
+)
+REFERENT_MAX = 300
+
+
+def _resolve_reply_reference(prompt: str, message: Message) -> str:
+    """Если сообщение — реплай на текст, подставить текст родителя вместо «это».
+
+    «сгенерируй это» (реплай на «кот») → «кот». «нарисуй это акварелью» →
+    «кот акварелью». Если в промпте нет указательного слова — оставляем как есть,
+    чтобы не подмешивать чужой текст в явный запрос.
+    """
+    replied = message.reply_to_message
+    if replied is None:
+        return prompt
+    referent = (replied.text or replied.caption or "").strip(EDGE_TRIM)
+    if not referent:
+        return prompt
+    referent = referent[:REFERENT_MAX]
+    resolved = DEICTIC_RE.sub(referent, prompt, count=1).strip(EDGE_TRIM)
+    return resolved or referent
+
 
 def extract_generate_intent(text: str) -> dict[str, str] | None:
     """Return {"prompt": ...} if the text is an image-generation request, else None.
@@ -84,7 +111,7 @@ class GenerateImageSkill:
 
     async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
         _ = state  # not used; FSM is wired only for skills that need it
-        prompt: str = params["prompt"]
+        prompt: str = _resolve_reply_reference(params["prompt"], message)
 
         assert message.bot is not None  # aiogram populates this for incoming updates
         await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
