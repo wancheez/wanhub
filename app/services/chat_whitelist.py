@@ -113,6 +113,32 @@ def deny(chat_id: int, admin_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def list_by_status(status: Status | None = None) -> list[dict]:
+    """Список записей whitelist. `status=None` — все статусы.
+
+    Сортировка: свежие решения и запросы сверху, чтобы недавняя активность была
+    под рукой.
+    """
+    _ensure_schema()
+    cols = (
+        "chat_id, status, chat_type, chat_title, "
+        "requested_by, requested_by_name, created_at, decided_at, decided_by"
+    )
+    with _conn() as c:
+        if status is None:
+            rows = c.execute(
+                f"SELECT {cols} FROM chat_whitelist "
+                "ORDER BY status, decided_at DESC, created_at DESC"
+            ).fetchall()
+        else:
+            rows = c.execute(
+                f"SELECT {cols} FROM chat_whitelist WHERE status = ? "
+                "ORDER BY decided_at DESC, created_at DESC",
+                (status,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_request(chat_id: int) -> dict | None:
     _ensure_schema()
     with _conn() as c:
