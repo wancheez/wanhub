@@ -14,6 +14,7 @@ from aiogram.types import (
     MessageOriginChat,
     MessageOriginHiddenUser,
     MessageOriginUser,
+    PhotoSize,
 )
 
 from app.bot.format import for_telegram
@@ -139,11 +140,32 @@ async def edit_photo(message: Message) -> None:
     if not message.photo:  # F.photo гарантирует, но успокаиваем типизатор
         return
 
+    # message.photo — список превью по возрастанию размера; берём самое крупное.
+    await _run_photo_edit(message, message.photo[-1], instruction)
+
+
+async def _try_edit_replied_photo(message: Message, instruction: str) -> bool:
+    """Ответ текстом на фото → правка того фото. True, если обработали.
+
+    Позволяет редактировать чужое (или своё прежнее) фото из чата: отвечаешь
+    на сообщение с картинкой инструкцией «Чат, отредактируй …». Если ответ не
+    на фото или инструкция пустая — возвращаем False, пусть идёт обычный путь.
+    """
+    replied = message.reply_to_message
+    if replied is None or not replied.photo:
+        return False
+    instruction = instruction.strip()
+    if not instruction:
+        return False
+    await _run_photo_edit(message, replied.photo[-1], instruction)
+    return True
+
+
+async def _run_photo_edit(message: Message, photo: PhotoSize, instruction: str) -> None:
+    """Скачать фото из Telegram, прогнать через Gemini и ответить картинкой."""
     assert message.bot is not None  # aiogram populates this for incoming updates
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
 
-    # message.photo — список превью по возрастанию размера; берём самое крупное.
-    photo = message.photo[-1]
     src = await message.bot.get_file(photo.file_id)
     if src.file_path is None:
         await message.answer("Не удалось скачать фото из Telegram, попробуй ещё раз.")
@@ -155,7 +177,7 @@ async def edit_photo(message: Message) -> None:
         photo.width,
         photo.height,
         buf.getbuffer().nbytes,
-        instruction[:60],
+        instruction[:200],
     )
 
     result = await edit_image(instruction, buf.getvalue(), mime="image/jpeg")
@@ -173,6 +195,9 @@ async def edit_photo(message: Message) -> None:
 
 async def _route(message: Message, text: str, state: FSMContext) -> None:
     """Try local skills first (free, no LLM); fall through to Claude."""
+    # Ответ на фото с инструкцией — это правка картинки, а не текстовый чат.
+    if await _try_edit_replied_photo(message, text):
+        return
     if await try_skills(message, text, state):
         return
     await _do_chat(message, text)

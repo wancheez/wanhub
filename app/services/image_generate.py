@@ -137,14 +137,33 @@ async def _generate(parts: list[dict], op: str, subject: str) -> tuple[bytes, st
 
     try:
         data = r.json()
-        candidate = data["candidates"][0]
-        resp_parts = candidate["content"]["parts"]
-    except (KeyError, IndexError, ValueError, TypeError):
-        log.warning("image %s: неожиданная структура ответа", op)
+    except ValueError:
+        log.warning("image %s: ответ не JSON (%.1fs) — %s", op, elapsed, r.text[:200])
+        return None
+    if not isinstance(data, dict):
+        log.warning("image %s: неожиданная структура ответа: %r", op, data)
         return None
 
     usage = data.get("usageMetadata", {}) or {}
+
+    # Весь запрос мог быть отклонён ещё до генерации (safety на промпте/фото) —
+    # тогда candidates пустой, а причина лежит в promptFeedback.blockReason.
+    candidates = data.get("candidates") or []
+    if not candidates:
+        block = (data.get("promptFeedback") or {}).get("blockReason", "?")
+        log.info("image %s: запрос отклонён (blockReason=%s) — %s", op, block, subject)
+        return None
+
+    candidate = candidates[0]
     finish = candidate.get("finishReason", "?")
+    # content/parts может отсутствовать, если модель ничего не сгенерировала
+    # (сработал safety-фильтр, упёрлись в MAX_TOKENS и т.п.). Это не «кривой
+    # ответ», а штатный отказ — логируем причину и тихо отдаём None.
+    resp_parts = ((candidate.get("content") or {}).get("parts")) or []
+    if not resp_parts:
+        _log_usage(op, usage, 0, "none", elapsed, finish)
+        log.info("image %s: пустой ответ (finish=%s) — %s", op, finish, subject)
+        return None
 
     # Ответ может содержать и текст, и картинку — берём первую inlineData-часть.
     for part in resp_parts:
@@ -169,7 +188,7 @@ async def generate_image(prompt: str) -> tuple[bytes, str] | None:
     """Сгенерировать картинку по тексту. (bytes, mime) или None при ошибке."""
     if not prompt.strip():
         return None
-    return await _generate([{"text": prompt}], "generate", repr(prompt[:60]))
+    return await _generate([{"text": prompt}], "generate", repr(prompt[:200]))
 
 
 async def edit_image(
@@ -186,4 +205,4 @@ async def edit_image(
         {"text": prompt},
         {"inlineData": {"mimeType": mime, "data": base64.b64encode(image_bytes).decode()}},
     ]
-    return await _generate(parts, "edit", repr(prompt[:60]))
+    return await _generate(parts, "edit", repr(prompt[:200]))
