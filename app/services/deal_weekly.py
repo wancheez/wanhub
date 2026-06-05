@@ -260,15 +260,9 @@ async def render_summary_podium(
     if not top:
         return None
     champion = top[0].user_name
-    title = (
-        "Итоги недели «Сделка или нет»"
-        if kind == "weekly"
-        else "Промежуточные итоги «Сделка»"
-    )
+    title = "Итоги недели «Сделка или нет»" if kind == "weekly" else "Промежуточные итоги «Сделка»"
     footer = (
-        f"Поздравляем {champion} с победой!"
-        if kind == "weekly"
-        else f"Поздравляем {champion}!"
+        f"Поздравляем {champion} с победой!" if kind == "weekly" else f"Поздравляем {champion}!"
     )
     avatars = await fetch_avatars(bot, [r.user_id for r in top])
     entries = [

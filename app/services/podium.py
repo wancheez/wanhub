@@ -182,7 +182,9 @@ def _draw_medallion(
     # Фолбэк: тёмный круг + инициалы цветом медали.
     inner = (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r)
     draw.ellipse(inner, fill=(22, 26, 44))
-    draw.text((cx, cy), _initials(entry.name), font=_font(46, bold=True), fill=_MEDAL[rank], anchor="mm")
+    draw.text(
+        (cx, cy), _initials(entry.name), font=_font(46, bold=True), fill=_MEDAL[rank], anchor="mm"
+    )
 
 
 def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> None:
@@ -255,11 +257,21 @@ def render_podium(
     draw = ImageDraw.Draw(img)
 
     # Заголовок и период по центру сверху.
-    draw.text((_W // 2, 56), _fit_text(draw, title, _font(44, bold=True), _W - 80),
-              font=_font(44, bold=True), fill=_TITLE, anchor="mm")
+    draw.text(
+        (_W // 2, 56),
+        _fit_text(draw, title, _font(44, bold=True), _W - 80),
+        font=_font(44, bold=True),
+        fill=_TITLE,
+        anchor="mm",
+    )
     if period:
-        draw.text((_W // 2, 104), _fit_text(draw, period, _font(26), _W - 80),
-                  font=_font(26), fill=_SUBTITLE, anchor="mm")
+        draw.text(
+            (_W // 2, 104),
+            _fit_text(draw, period, _font(26), _W - 80),
+            font=_font(26),
+            fill=_SUBTITLE,
+            anchor="mm",
+        )
 
     # Три слота по горизонтали, центрируем блок из трёх тумб.
     total_w = _BAR_W * 3 + _BAR_GAP * 2
@@ -271,8 +283,13 @@ def render_podium(
         _draw_bar(img, slot_x, rank, entries[rank])
 
     if footer:
-        draw.text((_W // 2, _H - 16), _fit_text(draw, footer, _font(22), _W - 80),
-                  font=_font(22), fill=_FOOTER, anchor="mm")
+        draw.text(
+            (_W // 2, _H - 16),
+            _fit_text(draw, footer, _font(22), _W - 80),
+            font=_font(22),
+            fill=_FOOTER,
+            anchor="mm",
+        )
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)

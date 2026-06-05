@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from html import escape
 
@@ -728,53 +729,6 @@ def _text_finished_board(session: deal.DealSession) -> str:
     return "\n".join(lines)
 
 
-def _what_if_line(session: deal.DealSession, p: deal.PlayerState) -> str | None:
-    """«А что если бы»: что игрок упустил своим выбором.
-
-    Два сценария:
-      • `dealt` — показываем все оферы банкира ПОСЛЕ его сделки + сколько было
-        в общем личном кейсе.
-      • `won_final` со swap_kept — показываем, что было бы при другом выборе:
-        для swap'нувшего → личный, для оставшего → значение стола.
-    None если показывать нечего.
-    """
-    if p.status == "dealt" and p.deal_round_idx is not None:
-        later = session.offer_history[p.deal_round_idx + 1 :]
-        # «В личном было N» показываем только если партия дошла до SWAP — там
-        # значение личного кейса вписано в сравнение «свап-исход vs альтернатива».
-        # Иначе сумма уже выведена в шапке («Личный кейс 🐱: N»), повтор лишний.
-        had_swap = any(pp.swap_kept is not None for pp in session.players.values())
-        parts: list[str] = []
-        if later:
-            parts.append(
-                "банкер потом давал " + ", ".join(_fmt_rub_compact(v) for v in later) + " ₽"
-            )
-        if had_swap and session.personal_case_id is not None:
-            personal_value = session.case_values[session.personal_case_id]
-            parts.append(f"в личном было {_fmt_rub(personal_value)}")
-        if not parts:
-            return None
-        return "    <i>↪ " + "; ".join(parts) + "</i>"
-
-    if (
-        p.status == "won_final"
-        and p.swap_kept is not None
-        and session.personal_case_id is not None
-        and session.final_table_case_id is not None
-    ):
-        personal_val = session.case_values[session.personal_case_id]
-        table_val = session.case_values[session.final_table_case_id]
-        if p.swap_kept is True:
-            alt = table_val
-            text = f"если бы поменял — взял бы <b>{_fmt_rub(alt)}</b>"
-        else:
-            alt = personal_val
-            text = f"если бы оставил личный — взял бы <b>{_fmt_rub(alt)}</b>"
-        return f"    <i>↪ {text}</i>"
-
-    return None
-
-
 def _ranked_players(session: deal.DealSession) -> list[deal.PlayerState]:
     """Игроки партии по убыванию выигрыша (тай-брейк по имени)."""
     return sorted(session.players.values(), key=lambda p: (-p.winnings, p.name.lower()))
@@ -830,9 +784,6 @@ def _text_end_summary(session: deal.DealSession) -> str:
     lines.append("")
     for i, p in enumerate(_ranked_players(session)):
         lines.append(_player_line(i, p))
-        wif = _what_if_line(session, p)
-        if wif is not None:
-            lines.append(wif)
     # Кликабельные команды в plain-тексте: Telegram сам подсветит /deal и
     # /dealtop как быстрый запуск — без лишних кнопок.
     lines.append("")
@@ -888,6 +839,46 @@ def _render_game_podium(
     except Exception:
         log.exception("deal: game podium render failed for chat=%d", session.chat_id)
         return None
+
+
+# Лимит подписи к фото в Telegram. Считается по видимому тексту (без HTML-тегов).
+_CAPTION_LIMIT = 1024
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _caption_text_len(html_text: str) -> int:
+    """Грубая длина видимого текста: вырезаем HTML-теги. Запас огромный, так что
+    мелкая погрешность на сущностях (&lt; и т.п.) роли не играет."""
+    return len(_HTML_TAG_RE.sub("", html_text))
+
+
+async def _send_game_result(
+    message: Message, session: deal.DealSession, image: bytes | None
+) -> None:
+    """Отправить итоги партии. Один пост (фото + полный текст подписью), если он
+    влезает в лимит подписи. Иначе — фото с короткой подписью и полный текст
+    отдельным сообщением. Без картинки — просто текст. Дубля не делаем.
+    """
+    summary = _text_end_summary(session)
+    photo = BufferedInputFile(image, filename="game.png") if image is not None else None
+
+    if photo is not None and _caption_text_len(summary) <= _CAPTION_LIMIT:
+        try:
+            await message.answer_photo(photo, caption=summary, parse_mode="HTML")
+            return
+        except TelegramAPIError:
+            # Не вышло одним постом — упадём на раздельную отправку ниже.
+            log.exception("deal: photo+full caption failed for chat=%d", session.chat_id)
+
+    if photo is not None:
+        try:
+            await message.answer_photo(photo, caption=_podium_caption(session), parse_mode="HTML")
+        except TelegramAPIError:
+            log.exception("deal: photo+short caption failed for chat=%d", session.chat_id)
+    try:
+        await message.answer(summary, parse_mode="HTML")
+    except TelegramAPIError:
+        log.exception("deal: end summary send failed for chat=%d", session.chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1970,13 +1961,10 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
 
         await _drama_replay(message, session)
 
-        # Сначала фото-пьедестал с короткой подписью (шапка + топ-3), затем
-        # подробный текстовый разбор отдельным сообщением. Рендер не должен
-        # ронять финал: при сбое (image=None) просто пропускаем картинку.
+        # Один пост: фото-пьедестал, а полный текст итогов идёт его подписью.
+        # Рендер не должен ронять финал: при сбое (image=None) шлём только текст.
         top_uids = [
-            p.user_id
-            for p in _ranked_players(session)
-            if p.status in ("dealt", "won_final")
+            p.user_id for p in _ranked_players(session) if p.status in ("dealt", "won_final")
         ][:3]
         avatars = (
             await fetch_avatars(message.bot, top_uids)
@@ -1984,20 +1972,7 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
             else {}
         )
         image = _render_game_podium(session, avatars)
-        if image is not None:
-            try:
-                await message.answer_photo(
-                    BufferedInputFile(image, filename="game.png"),
-                    caption=_podium_caption(session),
-                    parse_mode="HTML",
-                )
-            except TelegramAPIError:
-                log.exception("deal: failed to send game podium for chat=%d", session.chat_id)
-        summary = _text_end_summary(session)
-        try:
-            await message.answer(summary, parse_mode="HTML")
-        except TelegramAPIError:
-            log.exception("deal: failed to send end summary for chat=%d", session.chat_id)
+        await _send_game_result(message, session, image)
 
         for p in session.players.values():
             if p.status not in ("dealt", "won_final"):
