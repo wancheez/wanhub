@@ -1,6 +1,6 @@
 """Еженедельные итоги «Блэкджека».
 
-Каждое воскресенье в 21:00 МСК (== 18:00 UTC) фоновый таск рассылает в
+Каждый понедельник в 21:00 МСК (== 18:00 UTC) фоновый таск рассылает в
 чаты, где играли за прошедшую неделю, саммари: топ-3 по net выигрышу,
 поздравление чемпиона. Записи в `bj_outcomes` физически НЕ удаляются —
 сброс — это INSERT в `bj_resets`, дальше все запросы баланса/топа
@@ -38,7 +38,7 @@ __all__ = [
 
 MSK = timezone(timedelta(hours=3))
 SUMMARY_HOUR_MSK = 21
-SUMMARY_WEEKDAY = 6  # .weekday(): пн=0 … вс=6
+SUMMARY_WEEKDAY = 0  # .weekday(): пн=0 … вс=6 — итоги по понедельникам
 TOP_LIMIT = 5
 
 # Без локали (на Pi может не быть ru_RU). Родительный падеж — для «11 мая».
@@ -60,8 +60,8 @@ def _summary_dt_msk(date_msk: datetime) -> datetime:
 def next_summary_boundary_utc(now: datetime) -> datetime:
     """Ближайшая будущая граница (строго > now), в UTC."""
     now_msk = now.astimezone(MSK)
-    days_until_sun = (SUMMARY_WEEKDAY - now_msk.weekday()) % 7
-    candidate = _summary_dt_msk(now_msk + timedelta(days=days_until_sun))
+    days_until = (SUMMARY_WEEKDAY - now_msk.weekday()) % 7
+    candidate = _summary_dt_msk(now_msk + timedelta(days=days_until))
     if candidate <= now_msk:
         candidate += timedelta(days=7)
     return candidate.astimezone(UTC)
@@ -70,8 +70,8 @@ def next_summary_boundary_utc(now: datetime) -> datetime:
 def previous_summary_boundary_utc(now: datetime) -> datetime:
     """Последняя граница ≤ now, в UTC."""
     now_msk = now.astimezone(MSK)
-    days_since_sun = (now_msk.weekday() - SUMMARY_WEEKDAY) % 7
-    candidate = _summary_dt_msk(now_msk - timedelta(days=days_since_sun))
+    days_since = (now_msk.weekday() - SUMMARY_WEEKDAY) % 7
+    candidate = _summary_dt_msk(now_msk - timedelta(days=days_since))
     if candidate > now_msk:
         candidate -= timedelta(days=7)
     return candidate.astimezone(UTC)
@@ -201,7 +201,7 @@ async def post_weekly(bot: Bot, end_utc: datetime) -> int:
 
 
 async def weekly_summary_loop(bot: Bot) -> None:
-    """Бесконечный фоновый цикл, публикующий регулярные итоги по воскресеньям.
+    """Бесконечный фоновый цикл, публикующий регулярные итоги по понедельникам.
 
     На старте: catch-up для последней пропущенной плановой границы. Затем
     спим до следующей; после сна пересчитываем «последнюю границу» — на Pi

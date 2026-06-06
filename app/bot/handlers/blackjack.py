@@ -8,7 +8,7 @@
 `blackjack_db.record_outcome`.
 
 Баланс игрока = `blackjack_db.STARTING_BALANCE` + SUM(payout с последнего
-недельного сброса). Сброс — каждое воскресенье 21:00 МСК через фоновую
+недельного сброса). Сброс — каждый понедельник 21:00 МСК через фоновую
 задачу `blackjack_weekly.weekly_summary_loop`.
 
 Команды:
@@ -225,17 +225,17 @@ def _rules_text() -> str:
         "  • Дилерский BJ при первом раскрытии — все без BJ проигрывают сразу\n"
         "\n"
         f"💵 <b>Фишки.</b> Стартовый банкролл — {_fmt_chips(blackjack_db.STARTING_BALANCE)} "
-        "фишек. Каждое воскресенье 21:00 МСК — глобальный сброс: всем заново "
+        "фишек. Каждый понедельник 21:00 МСК — глобальный сброс: всем заново "
         "по столько же, лидерборд недели фиксируется.\n"
         "\n"
-        "🔒 <b>Банкрот.</b> Если ушёл в 0 до воскресенья — отдыхаешь до сброса. "
+        "🔒 <b>Банкрот.</b> Если ушёл в 0 до понедельника — отдыхаешь до сброса. "
         "Это часть игры: считай карты, не отыгрывайся слепо.\n"
         "\n"
         "📊 <b>Ставки.</b> На фазе ставок жми 5%/10%/25%/50%/All-in от своего "
         "баланса. Минимум — 1 фишка.\n"
         "\n"
         "🏆 <b>Рейтинг чата:</b> /blackjacktop — топ текущей недели по чистой "
-        "прибыли (net). Сброс — вс 21:00 МСК.\n"
+        "прибыли (net). Сброс — пн 21:00 МСК.\n"
     )
 
 
@@ -270,7 +270,7 @@ def _text_betting(session: blackjack.BlackjackSession) -> str:
         p = session.players[uid]
         balance = blackjack_db.get_balance(session.chat_id, uid)
         if balance <= 0:
-            lines.append(f"🔒 <b>{escape(p.name)}</b> — банкрот, ждёт сброса (вс 21:00 МСК)")
+            lines.append(f"🔒 <b>{escape(p.name)}</b> — банкрот, ждёт сброса (пн 21:00 МСК)")
             continue
         if p.bet_amount > 0:
             lines.append(
@@ -685,9 +685,9 @@ async def start_blackjack_from_skill(message: Message) -> None:
     balance = blackjack_db.get_balance(chat_id, user.id)
     if balance <= 0:
         await message.answer(
-            "🔒 У тебя 0 фишек, до воскресенья отдыхаешь. "
+            "🔒 У тебя 0 фишек, до понедельника отдыхаешь. "
             f"Стартовый банкролл — {_fmt_chips(blackjack_db.STARTING_BALANCE)} фишек, "
-            "сброс вс 21:00 МСК."
+            "сброс пн 21:00 МСК."
         )
         return
     session = blackjack.create_session(chat_id, user.id, user_name)
@@ -746,13 +746,13 @@ async def cmd_blackjacktop(message: Message) -> None:
         await message.answer(
             "<b>🏆 Топ недели «Блэкджек»</b>\n"
             "Пока никто не сыграл. Запусти /blackjack — и поехали!\n"
-            "<i>Сброс: вс 21:00 МСК.</i>",
+            "<i>Сброс: пн 21:00 МСК.</i>",
             parse_mode="HTML",
         )
         return
     lines = [
         "<b>🏆 Топ недели «Блэкджек»</b>",
-        f"<i>Сброс: вс 21:00 МСК · стартовый банкролл {_fmt_chips(blackjack_db.STARTING_BALANCE)}</i>",
+        f"<i>Сброс: пн 21:00 МСК · стартовый банкролл {_fmt_chips(blackjack_db.STARTING_BALANCE)}</i>",
         "",
     ]
     medals = ["🥇", "🥈", "🥉"]
@@ -886,7 +886,7 @@ async def on_start(cb: CallbackQuery) -> None:
             session.broke_players[uid] = p.name
             del session.players[uid]
     if not session.players:
-        await cb.answer("Все игроки — банкроты до воскресенья.", show_alert=True)
+        await cb.answer("Все игроки — банкроты до понедельника.", show_alert=True)
         return
 
     res = blackjack.start_after_lobby(session)
@@ -930,7 +930,7 @@ async def on_bet(cb: CallbackQuery) -> None:
         return
     balance = blackjack_db.get_balance(chat_id, cb.from_user.id)
     if balance <= 0:
-        await cb.answer("🔒 Ты банкрот, ждёшь сброса (вс 21:00 МСК).")
+        await cb.answer("🔒 Ты банкрот, ждёшь сброса (пн 21:00 МСК).")
         return
     assert isinstance(cb.message, Message)
 
