@@ -86,8 +86,7 @@ async def ensure_can_draw(message: Message) -> bool:
             IMAGE_DAILY_LIMIT,
         )
         await message.answer(
-            f"На сегодня лимит рисований исчерпан "
-            f"({IMAGE_DAILY_LIMIT} в день). Возвращайся завтра."
+            f"На сегодня лимит рисований исчерпан ({IMAGE_DAILY_LIMIT} в день). Возвращайся завтра."
         )
         return False
     return True
