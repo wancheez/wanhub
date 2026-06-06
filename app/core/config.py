@@ -69,6 +69,11 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
 # эндпоинт (:predict) и формат, наш код их не поймёт. См. .env.example.
 GEMINI_IMAGE_MODEL: str = os.getenv("GEMINI_IMAGE_MODEL", "").strip() or "gemini-3.1-flash-image"
 
+# Сколько картинок в день может сгенерировать обычный пользователь.
+# Считается per-user по календарным суткам в MSK (см. app/services/image_quota.py).
+# Админ (TELEGRAM_ADMIN_ID) лимитом не ограничен. 0 или меньше — без лимита.
+IMAGE_DAILY_LIMIT: int = _parse_int(os.getenv("IMAGE_DAILY_LIMIT", "")) or 3
+
 DEFAULT_QUIZ_QUESTIONS = 5
 MAX_QUIZ_QUESTIONS = 30
 
@@ -116,6 +121,10 @@ BLACKJACK_DB_PATH: Path = PROJECT_ROOT / "data" / "blackjack.sqlite3"
 # Используется как AVOID-список, чтобы при повторных партиях в одном чате
 # модель не возвращала те же ответы (см. `app/services/llm_history.py`).
 LLM_HISTORY_DB_PATH: Path = PROJECT_ROOT / "data" / "llm_history.sqlite3"
+
+# Writable SQLite с дневными счётчиками генерации картинок per-user
+# (см. app/services/image_quota.py). Используется для лимита IMAGE_DAILY_LIMIT.
+IMAGE_QUOTA_DB_PATH: Path = PROJECT_ROOT / "data" / "image_quota.sqlite3"
 
 APP_TITLE = "My Web Server"
 APP_VERSION = "0.1.0"
