@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.services.device import get_device_info
+from app.services.version import get_version
 
 router = Router(name="device")
 
@@ -36,6 +37,7 @@ async def cmd_device(message: Message) -> None:
 
     text = (
         f"<b>{escape(info.model)}</b>\n"
+        f"версия: <code>{escape(get_version().short())}</code>\n"
         f"hostname: <code>{escape(info.hostname)}</code>\n"
         f"ядро: <code>{escape(info.kernel)}</code>\n"
         f"uptime: {_format_uptime(info.uptime_seconds)}\n\n"

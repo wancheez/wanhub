@@ -140,24 +140,54 @@ class GenerateImageSkill:
         _ = state  # not used; FSM is wired only for skills that need it
         prompt: str = params["prompt"]
 
-        # Дневной лимит для обычных пользователей. Админ и анонимные апдейты
-        # (from_user is None) не ограничиваются; лимит ≤ 0 отключает проверку.
-        user_id = message.from_user.id if message.from_user else None
-        limited = (
-            IMAGE_DAILY_LIMIT > 0
-            and user_id is not None
-            and user_id != TELEGRAM_ADMIN_ID
+        # Субъект квоты. Обычно это from_user.id, но у постов от имени канала и
+        # анонимных админов from_user пустой — тогда берём sender_chat.id, а в
+        # крайнем случае chat.id. Так лимит не обойти, отправив запрос анонимно.
+        # Конфликта id нет: пользователи — положительные, чаты/каналы —
+        # отрицательные. Админ опознаётся ТОЛЬКО по настоящему from_user.id.
+        is_admin = message.from_user is not None and message.from_user.id == TELEGRAM_ADMIN_ID
+        if message.from_user is not None:
+            subject_id = message.from_user.id
+        elif message.sender_chat is not None:
+            subject_id = message.sender_chat.id
+        else:
+            subject_id = message.chat.id
+        limited = IMAGE_DAILY_LIMIT > 0 and not is_admin
+        log.info(
+            "generate_image skill: prompt=%r subject_id=%s admin=%s admin_id=%s "
+            "limit=%d limited=%s quota_available=%s",
+            prompt,
+            subject_id,
+            is_admin,
+            TELEGRAM_ADMIN_ID,
+            IMAGE_DAILY_LIMIT,
+            limited,
+            image_quota.is_available(),
         )
-        if limited and image_quota.used_today(user_id) >= IMAGE_DAILY_LIMIT:
-            await message.answer(
-                f"На сегодня лимит рисований исчерпан "
-                f"({IMAGE_DAILY_LIMIT} в день). Возвращайся завтра."
+        if limited:
+            used = image_quota.used_today(subject_id)
+            log.info(
+                "generate_image skill: quota check subject_id=%s used=%d/%d day=%s",
+                subject_id,
+                used,
+                IMAGE_DAILY_LIMIT,
+                image_quota.day_key(),
             )
-            return
+            if used >= IMAGE_DAILY_LIMIT:
+                log.info(
+                    "generate_image skill: limit reached for subject_id=%s (%d/%d) — отказ",
+                    subject_id,
+                    used,
+                    IMAGE_DAILY_LIMIT,
+                )
+                await message.answer(
+                    f"На сегодня лимит рисований исчерпан "
+                    f"({IMAGE_DAILY_LIMIT} в день). Возвращайся завтра."
+                )
+                return
 
         assert message.bot is not None  # aiogram populates this for incoming updates
         await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
-        log.info("generate_image skill: %r", prompt)
 
         result = await generate_image(prompt)
         if result is None:
@@ -170,11 +200,23 @@ class GenerateImageSkill:
         ext = mime.removeprefix("image/").split("+")[0] or "png"
         filename = f"{_safe_filename_stem(prompt)}.{ext}"
         await message.answer_photo(BufferedInputFile(body, filename=filename))
-        log.info("generate_image skill: sent (%d bytes, %s)", len(body), mime)
+        log.info(
+            "generate_image skill: sent (%d bytes, %s) без подписи, limited=%s",
+            len(body),
+            mime,
+            limited,
+        )
 
         if limited:
-            used = image_quota.increment(user_id)
+            used = image_quota.increment(subject_id)
             remaining = max(IMAGE_DAILY_LIMIT - used, 0)
+            log.info(
+                "generate_image skill: counted subject_id=%s used=%d/%d remaining=%d — шлю остаток",
+                subject_id,
+                used,
+                IMAGE_DAILY_LIMIT,
+                remaining,
+            )
             await message.answer(
                 f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня."
             )

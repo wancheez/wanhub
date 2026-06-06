@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "wanhub"
-version = "0.1.0"
-description = "FastAPI веб-сервер + Telegram-бот для Raspberry Pi с интеграцией Claude"
+version = "0.2.0"
+description = "FastAPI веб-сервер + Telegram-бот с интеграцией Claude"
 authors = ["Иван Ерохин <wancheez@gmail.com>"]
 license = "MIT"
 readme = "README.md"

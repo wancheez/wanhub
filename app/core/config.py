@@ -127,7 +127,10 @@ LLM_HISTORY_DB_PATH: Path = PROJECT_ROOT / "data" / "llm_history.sqlite3"
 IMAGE_QUOTA_DB_PATH: Path = PROJECT_ROOT / "data" / "image_quota.sqlite3"
 
 APP_TITLE = "My Web Server"
-APP_VERSION = "0.1.0"
+# Семантическая версия бота. Бампить вручную при заметных изменениях; точную
+# идентификацию сборки (git-коммит) добавляет app/services/version.py. Держать
+# в синхроне с version в pyproject.toml.
+APP_VERSION = "0.2.0"
 
 HOST = "0.0.0.0"
 PORT = 8000

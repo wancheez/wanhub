@@ -21,6 +21,8 @@ log = logging.getLogger("app")
 __all__ = [
     "day_key",
     "increment",
+    "init_db",
+    "is_available",
     "reset_cache",
     "used_today",
 ]
@@ -51,9 +53,30 @@ def reset_cache() -> None:
     _unavailable = False
 
 
+def is_available() -> bool:
+    """False, если БД квот недоступна (лимит мягко отключён)."""
+    return not _unavailable
+
+
 def day_key() -> str:
     """Текущая календарная дата в MSK как 'YYYY-MM-DD'."""
     return datetime.now(UTC).astimezone(MSK).strftime("%Y-%m-%d")
+
+
+def init_db() -> None:
+    """Создать файл/таблицу на старте бота. Опционально: тот же ленивый путь
+    делает это при первом обращении, но ранний вызов ловит ошибку прав
+    (неписабельный data/) сразу в логе, а не на первой генерации.
+    """
+    global _unavailable
+    try:
+        _get_connection()
+        log.info("image_quota: ready at %s", IMAGE_QUOTA_DB_PATH)
+    except (sqlite3.Error, OSError) as e:
+        _unavailable = True
+        log.warning(
+            "image_quota: init failed (%s) — лимит будет отключён (no-op)", e
+        )
 
 
 def _get_connection() -> sqlite3.Connection:

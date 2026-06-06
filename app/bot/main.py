@@ -8,9 +8,10 @@ from aiogram.client.default import DefaultBotProperties
 from app.bot.auth import ChatWhitelistMiddleware
 from app.bot.handlers import register_handlers
 from app.core.config import TELEGRAM_ADMIN_ID, TELEGRAM_BOT_TOKEN
-from app.services import blackjack_db, deal_db, llm_history
+from app.services import blackjack_db, deal_db, image_quota, llm_history
 from app.services.blackjack_weekly import weekly_summary_loop as blackjack_weekly_loop
 from app.services.deal_weekly import weekly_summary_loop
+from app.services.version import get_version
 
 log = logging.getLogger("app")
 
@@ -26,7 +27,7 @@ _blackjack_weekly_task: asyncio.Task | None = None
 async def start_bot() -> None:
     global bot, dp, _polling_task, _weekly_task, _blackjack_weekly_task
 
-    log.info("start_bot: begin")
+    log.info("start_bot: begin, version=%s", get_version().short())
 
     if not TELEGRAM_BOT_TOKEN:
         log.info("start_bot: bot disabled (TELEGRAM_BOT_TOKEN not set)")
@@ -51,6 +52,7 @@ async def start_bot() -> None:
     deal_db.init_db()
     blackjack_db.init_db()
     llm_history.init_db()
+    image_quota.init_db()
     register_handlers(dp)
     log.info("start_bot: handlers registered, admin_id=%s", TELEGRAM_ADMIN_ID)
 
