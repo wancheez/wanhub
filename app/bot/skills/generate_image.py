@@ -201,7 +201,7 @@ class GenerateImageSkill:
         filename = f"{_safe_filename_stem(prompt)}.{ext}"
         await message.answer_photo(BufferedInputFile(body, filename=filename))
         log.info(
-            "generate_image skill: sent (%d bytes, %s) без подписи, limited=%s",
+            "generate_image skill: sent (%d bytes, %s), limited=%s",
             len(body),
             mime,
             limited,
@@ -217,6 +217,4 @@ class GenerateImageSkill:
                 IMAGE_DAILY_LIMIT,
                 remaining,
             )
-            await message.answer(
-                f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня."
-            )
+            await message.answer(f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня.")

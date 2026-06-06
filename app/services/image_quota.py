@@ -74,9 +74,7 @@ def init_db() -> None:
         log.info("image_quota: ready at %s", IMAGE_QUOTA_DB_PATH)
     except (sqlite3.Error, OSError) as e:
         _unavailable = True
-        log.warning(
-            "image_quota: init failed (%s) — лимит будет отключён (no-op)", e
-        )
+        log.warning("image_quota: init failed (%s) — лимит будет отключён (no-op)", e)
 
 
 def _get_connection() -> sqlite3.Connection:
