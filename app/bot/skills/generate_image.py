@@ -5,8 +5,7 @@ from typing import Any
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, Message
 
-from app.core.config import IMAGE_DAILY_LIMIT, TELEGRAM_ADMIN_ID
-from app.services import image_quota
+from app.bot.image_limit import ensure_can_draw, record_drawing
 from app.services.image_generate import generate_image
 
 log = logging.getLogger("app")
@@ -120,16 +119,6 @@ def _safe_filename_stem(prompt: str) -> str:
     return stem or "generated"
 
 
-def _plural_drawings(n: int) -> str:
-    """«рисование/рисования/рисований» по числу n."""
-    n10, n100 = n % 10, n % 100
-    if n10 == 1 and n100 != 11:
-        return "рисование"
-    if 2 <= n10 <= 4 and not 12 <= n100 <= 14:
-        return "рисования"
-    return "рисований"
-
-
 class GenerateImageSkill:
     name = "generate_image"
 
@@ -140,54 +129,12 @@ class GenerateImageSkill:
         _ = state  # not used; FSM is wired only for skills that need it
         prompt: str = params["prompt"]
 
-        # Субъект квоты. Обычно это from_user.id, но у постов от имени канала и
-        # анонимных админов from_user пустой — тогда берём sender_chat.id, а в
-        # крайнем случае chat.id. Так лимит не обойти, отправив запрос анонимно.
-        # Конфликта id нет: пользователи — положительные, чаты/каналы —
-        # отрицательные. Админ опознаётся ТОЛЬКО по настоящему from_user.id.
-        is_admin = message.from_user is not None and message.from_user.id == TELEGRAM_ADMIN_ID
-        if message.from_user is not None:
-            subject_id = message.from_user.id
-        elif message.sender_chat is not None:
-            subject_id = message.sender_chat.id
-        else:
-            subject_id = message.chat.id
-        limited = IMAGE_DAILY_LIMIT > 0 and not is_admin
-        log.info(
-            "generate_image skill: prompt=%r subject_id=%s admin=%s admin_id=%s "
-            "limit=%d limited=%s quota_available=%s",
-            prompt,
-            subject_id,
-            is_admin,
-            TELEGRAM_ADMIN_ID,
-            IMAGE_DAILY_LIMIT,
-            limited,
-            image_quota.is_available(),
-        )
-        if limited:
-            used = image_quota.used_today(subject_id)
-            log.info(
-                "generate_image skill: quota check subject_id=%s used=%d/%d day=%s",
-                subject_id,
-                used,
-                IMAGE_DAILY_LIMIT,
-                image_quota.day_key(),
-            )
-            if used >= IMAGE_DAILY_LIMIT:
-                log.info(
-                    "generate_image skill: limit reached for subject_id=%s (%d/%d) — отказ",
-                    subject_id,
-                    used,
-                    IMAGE_DAILY_LIMIT,
-                )
-                await message.answer(
-                    f"На сегодня лимит рисований исчерпан "
-                    f"({IMAGE_DAILY_LIMIT} в день). Возвращайся завтра."
-                )
-                return
+        if not await ensure_can_draw(message):
+            return  # лимит исчерпан, пользователю уже отвечено
 
         assert message.bot is not None  # aiogram populates this for incoming updates
         await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+        log.info("generate_image skill: %r", prompt)
 
         result = await generate_image(prompt)
         if result is None:
@@ -200,21 +147,6 @@ class GenerateImageSkill:
         ext = mime.removeprefix("image/").split("+")[0] or "png"
         filename = f"{_safe_filename_stem(prompt)}.{ext}"
         await message.answer_photo(BufferedInputFile(body, filename=filename))
-        log.info(
-            "generate_image skill: sent (%d bytes, %s), limited=%s",
-            len(body),
-            mime,
-            limited,
-        )
+        log.info("generate_image skill: sent (%d bytes, %s)", len(body), mime)
 
-        if limited:
-            used = image_quota.increment(subject_id)
-            remaining = max(IMAGE_DAILY_LIMIT - used, 0)
-            log.info(
-                "generate_image skill: counted subject_id=%s used=%d/%d remaining=%d — шлю остаток",
-                subject_id,
-                used,
-                IMAGE_DAILY_LIMIT,
-                remaining,
-            )
-            await message.answer(f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня.")
+        await record_drawing(message)

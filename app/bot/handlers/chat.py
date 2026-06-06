@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from app.bot.format import for_telegram
+from app.bot.image_limit import ensure_can_draw, record_drawing
 from app.bot.skills import try_skills
 from app.bot.skills.generate_image import resolve_generation_with_reply
 from app.services.chat import chat, reset_chat
@@ -28,7 +29,6 @@ log = logging.getLogger("app")
 
 TG_MAX = 4000  # Telegram limit is 4096; leave headroom for HTML tags
 MAX_QUOTED_CHARS = 1000  # cap reply-context quote to keep Claude prompts small
-IMAGE_CAPTION_MAX = 200  # подпись к отредактированному фото — Telegram лимит 1024
 
 # Trigger: message starts with the word "Чат" (any case), optionally followed
 # by punctuation/space. In groups required; in private chats optional.
@@ -165,6 +165,12 @@ async def _try_edit_replied_photo(message: Message, instruction: str) -> bool:
 async def _run_photo_edit(message: Message, photo: PhotoSize, instruction: str) -> None:
     """Скачать фото из Telegram, прогнать через Gemini и ответить картинкой."""
     assert message.bot is not None  # aiogram populates this for incoming updates
+
+    # Правка фото — тот же платный вызов Gemini, что и генерация; считаем в ту
+    # же дневную квоту (иначе через правку можно было бы обойти лимит).
+    if not await ensure_can_draw(message):
+        return  # лимит исчерпан, пользователю уже отвечено
+
     await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
 
     src = await message.bot.get_file(photo.file_id)
@@ -188,10 +194,8 @@ async def _run_photo_edit(message: Message, photo: PhotoSize, instruction: str) 
 
     body, mime = result
     ext = mime.removeprefix("image/").split("+")[0] or "jpg"
-    await message.answer_photo(
-        BufferedInputFile(body, filename=f"edited.{ext}"),
-        caption=instruction[:IMAGE_CAPTION_MAX],
-    )
+    await message.answer_photo(BufferedInputFile(body, filename=f"edited.{ext}"))
+    await record_drawing(message)
 
 
 async def _route(message: Message, text: str, state: FSMContext) -> None:

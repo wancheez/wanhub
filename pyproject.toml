@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "wanhub"
-version = "0.2.0"
+version = "0.3.0"
 description = "FastAPI веб-сервер + Telegram-бот с интеграцией Claude"
 authors = ["Иван Ерохин <wancheez@gmail.com>"]
 license = "MIT"
