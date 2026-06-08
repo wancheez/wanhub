@@ -1,3 +1,4 @@
+from app.bot.skills.anekdot import extract_anekdot_intent
 from app.bot.skills.generate_image import GenerateImageSkill, extract_generate_intent
 from app.bot.skills.send_image import SendImageSkill
 from app.bot.skills.show_dealtop import ShowDealTopSkill, extract_dealtop_intent
@@ -701,3 +702,41 @@ def test_generate_skill_match_returns_dict():
 def test_generate_skill_no_match_returns_none():
     s = GenerateImageSkill()
     assert s.match("расскажи про котов") is None
+
+
+# ----- AnekdotSkill (анекдот из ленты, без LLM) -----
+
+
+def test_anekdot_bare_word():
+    assert extract_anekdot_intent("анекдот") == {}
+
+
+def test_anekdot_with_verb():
+    assert extract_anekdot_intent("расскажи анекдот") == {}
+    assert extract_anekdot_intent("пришли анекдот") == {}
+    assert extract_anekdot_intent("скинь анекдот") == {}
+
+
+def test_anekdot_capitalized_and_punctuation():
+    assert extract_anekdot_intent("Расскажи анекдот!") == {}
+
+
+def test_anekdot_more_and_pronoun():
+    assert extract_anekdot_intent("расскажи мне ещё анекдот") == {}
+    assert extract_anekdot_intent("давай новый анекдотик") == {}
+
+
+def test_anekdot_plural_and_please():
+    assert extract_anekdot_intent("анекдоты") == {}
+    assert extract_anekdot_intent("расскажи анекдот пожалуйста") == {}
+
+
+def test_anekdot_with_topic_falls_through_to_llm():
+    # Тему лента не учтёт — такой запрос НЕ матчим, пусть идёт в LLM.
+    assert extract_anekdot_intent("анекдот про кошек") is None
+    assert extract_anekdot_intent("расскажи анекдот про программистов") is None
+
+
+def test_anekdot_unrelated_no_match():
+    assert extract_anekdot_intent("расскажи про котов") is None
+    assert extract_anekdot_intent("что нового") is None

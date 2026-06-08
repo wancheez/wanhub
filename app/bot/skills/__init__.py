@@ -1,6 +1,7 @@
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from app.bot.skills.anekdot import AnekdotSkill
 from app.bot.skills.base import Skill
 from app.bot.skills.generate_image import GenerateImageSkill
 from app.bot.skills.send_image import SendImageSkill
@@ -10,6 +11,7 @@ from app.bot.skills.start_game import StartGameSkill
 SKILLS: list[Skill] = [
     StartGameSkill(),
     ShowDealTopSkill(),
+    AnekdotSkill(),
     GenerateImageSkill(),
     SendImageSkill(),
 ]

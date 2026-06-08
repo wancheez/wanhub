@@ -225,6 +225,9 @@ class DealSession:
     # Чтобы повторные рендеры (на каждое Deal/No Deal) не дёргали LLM заново.
     # Сбрасывается в `transition_to_banker` (новая фаза — новая реплика).
     last_banker_line: str | None = None
+    # Анекдот, который банкир иногда травит в текущем BANKER-раунде (с anekdot.ru).
+    # None — без анекдота. Сбрасывается в `transition_to_banker` вместе с репликой.
+    last_banker_joke: str | None = None
     # Кольцевой буфер последних реплик банкира за всю партию — передаётся в LLM
     # как `previous_lines`, чтобы модель не дублировала конструкции между
     # раундами. Без буфера каждый запрос независимый и партии получаются
@@ -501,6 +504,7 @@ def transition_to_banker(session: DealSession) -> int:
     session.offer_history.append(offer)
     session.round_decisions = {}
     session.last_banker_line = None
+    session.last_banker_joke = None
     session.phase = DealPhase.BANKER
     log.info(
         "deal: chat=%d round %d/%d → banker offer %d ₽",

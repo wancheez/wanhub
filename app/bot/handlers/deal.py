@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import random
 from datetime import UTC, datetime
 from html import escape
 
@@ -35,6 +36,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.config import TELEGRAM_ADMIN_ID
 from app.services import (
+    anekdot,
     blackjack,
     deal,
     deal_banker_voice,
@@ -96,6 +98,12 @@ _auto_advance_tasks: dict[int, asyncio.Task[None]] = {}
 # `transition_to_banker`, не блокирует UI: пользователь видит офер сразу,
 # реплика дописывается через edit_text как только LLM ответит (~0.5–3 сек).
 _voice_tasks: dict[int, asyncio.Task[None]] = {}
+
+# Шанс, что в банкер-раунде банкир вдобавок к реплике травит анекдот (с
+# anekdot.ru). «Иногда»: при ~8 банкер-раундах за партию это примерно один-два
+# анекдота на игру — разряжает ритм, но не приедается. Если лента недоступна,
+# анекдота просто не будет (random_anecdote вернёт None).
+_BANKER_JOKE_CHANCE = 0.18
 
 # Per-chat сериализация переходов фаз. Апдейты aiogram обрабатываются
 # параллельными тасками (handle_as_tasks=True, без лимита), поэтому два
@@ -597,6 +605,13 @@ def _text_banker(session: deal.DealSession) -> str:
         lines.append(
             f"<blockquote>🎩 <b>Банкир:</b> <i>{escape(session.last_banker_line)}</i></blockquote>"
         )
+    if session.last_banker_joke:
+        # Иногда банкир разряжает обстановку анекдотом (лента anekdot.ru).
+        # Отдельный блок, чтобы не сливался с репликой про офер.
+        lines.append(
+            f"<blockquote>😄 <b>Анекдот от банкира:</b>\n"
+            f"<i>{escape(session.last_banker_joke)}</i></blockquote>"
+        )
     # Что открыли в этом раунде — суммы, на которые банкир и среагировал.
     if session.current_round_opened:
         opened_vals = sorted(
@@ -1078,25 +1093,41 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
     previous_lines = list(session.banker_line_history)
 
     async def _runner() -> None:
-        try:
-            line = await deal_banker_voice.banker_line(
-                round_idx=round_idx,
-                total_banker_rounds=total_banker_rounds,
-                offer=offer,
-                offer_prev=offer_prev,
-                remaining_avg=remaining_avg,
-                max_remaining=max_remaining,
-                last_round_opened_max=last_max,
-                opened_top=opened_top,
-                players=players_info,
-                round_opens=round_opens_info,
-                previous_lines=previous_lines,
-            )
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            log.exception("deal: chat=%d banker_voice failed", chat_id)
-            return
+        # Иногда банкир ВМЕСТО реплики травит анекдот. Шанс бросаем первым: если
+        # анекдот выпал и лента ответила — обычную реплику у LLM не запрашиваем
+        # вовсе (не тратим вызов). Если лента недоступна (None) — откатываемся к
+        # реплике от LLM, чтобы банкир не промолчал.
+        joke: str | None = None
+        if random.random() < _BANKER_JOKE_CHANCE:
+            try:
+                joke = await anekdot.random_anecdote()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("deal: chat=%d anekdot fetch failed", chat_id)
+
+        line: str | None = None
+        if joke is None:
+            try:
+                line = await deal_banker_voice.banker_line(
+                    round_idx=round_idx,
+                    total_banker_rounds=total_banker_rounds,
+                    offer=offer,
+                    offer_prev=offer_prev,
+                    remaining_avg=remaining_avg,
+                    max_remaining=max_remaining,
+                    last_round_opened_max=last_max,
+                    opened_top=opened_top,
+                    players=players_info,
+                    round_opens=round_opens_info,
+                    previous_lines=previous_lines,
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("deal: chat=%d banker_voice failed", chat_id)
+                return
+
         # Сессия могла уже завершиться / смениться, пока мы ждали ответ.
         if deal.get_session(chat_id) is not session:
             return
@@ -1107,13 +1138,15 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
         if session.current_message_id != target_message_id:
             return
         session.last_banker_line = line
-        # Кольцевой буфер длиной PREVIOUS_LINES_LIMIT: храним столько, сколько
-        # отправляем модели — больше держать незачем.
-        session.banker_line_history.append(line)
-        if len(session.banker_line_history) > deal_banker_voice.PREVIOUS_LINES_LIMIT:
-            session.banker_line_history = session.banker_line_history[
-                -deal_banker_voice.PREVIOUS_LINES_LIMIT :
-            ]
+        session.last_banker_joke = joke
+        # Кольцевой буфер антиповтора пополняем только реальной репликой LLM —
+        # в раунде с анекдотом реплики нет, истории добавлять нечего.
+        if line is not None:
+            session.banker_line_history.append(line)
+            if len(session.banker_line_history) > deal_banker_voice.PREVIOUS_LINES_LIMIT:
+                session.banker_line_history = session.banker_line_history[
+                    -deal_banker_voice.PREVIOUS_LINES_LIMIT :
+                ]
         text, kb = _render_payload(session)
         try:
             with _suppress_edit_noop():
