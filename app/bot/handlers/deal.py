@@ -1100,7 +1100,9 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
         joke: str | None = None
         if random.random() < _BANKER_JOKE_CHANCE:
             try:
-                joke = await anekdot.random_anecdote()
+                # Статус не важен: на исчерпание/недоступность (joke=None)
+                # банкир просто отдаст обычную реплику ниже.
+                joke, _ = await anekdot.random_anecdote()
             except asyncio.CancelledError:
                 return
             except Exception:

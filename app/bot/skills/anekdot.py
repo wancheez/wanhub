@@ -35,7 +35,8 @@ _ANEKDOT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_EMPTY_FALLBACK = "Анекдоты кончились, дай мне минутку и спроси ещё раз."
+_EXHAUSTED_REPLY = "На сегодня анекдоты закончились. Загляни завтра — будут свежие."
+_UNAVAILABLE_REPLY = "Не получилось достать анекдот, попробуй ещё раз чуть позже."
 
 
 def extract_anekdot_intent(text: str) -> dict[str, Any] | None:
@@ -50,5 +51,10 @@ class AnekdotSkill:
 
     async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
         _ = (params, state)  # не нужны: интент без параметров, FSM не используем
-        joke = await anekdot.random_anecdote()
-        await message.answer(joke if joke else _EMPTY_FALLBACK)
+        joke, outcome = await anekdot.random_anecdote()
+        if joke is not None:
+            await message.answer(joke)
+        elif outcome is anekdot.Outcome.EXHAUSTED:
+            await message.answer(_EXHAUSTED_REPLY)
+        else:
+            await message.answer(_UNAVAILABLE_REPLY)

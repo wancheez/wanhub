@@ -1,4 +1,9 @@
-from app.services.anekdot import MAX_ANECDOTE_CHARS, _clean, _parse_feed
+import asyncio
+
+import pytest
+
+from app.services import anekdot
+from app.services.anekdot import MAX_ANECDOTE_CHARS, Outcome, _clean, _parse_feed
 
 
 def test_clean_strips_br_and_entities():
@@ -55,3 +60,78 @@ def test_every_parsed_joke_within_limit():
         b"</channel></rss>"
     )
     assert all(len(j) <= MAX_ANECDOTE_CHARS for j in _parse_feed(xml))
+
+
+# ----- random_anecdote: общий пул, без повторов, статусы -----
+
+
+@pytest.fixture
+def reset_anekdot_state():
+    """Чистое состояние модуля до и после теста (глобальный пул/память)."""
+    anekdot._pool = []
+    anekdot._told = set()
+    anekdot._day = None
+    anekdot._fetched_at = 0.0
+    anekdot._last_fetch_ok = False
+    yield
+    anekdot._pool = []
+    anekdot._told = set()
+    anekdot._day = None
+
+
+def _patch_feeds(monkeypatch, by_url):
+    async def fake_fetch(url):
+        return list(by_url.get(url, []))
+
+    monkeypatch.setattr(anekdot, "_fetch_feed", fake_fetch)
+
+
+def test_random_anecdote_no_repeats_then_exhausted(monkeypatch, reset_anekdot_state):
+    _patch_feeds(monkeypatch, {anekdot.FEED_URLS[0]: ["a", "b", "c"]})
+
+    async def run():
+        got = []
+        for _ in range(3):
+            joke, outcome = await anekdot.random_anecdote()
+            assert outcome is Outcome.OK
+            got.append(joke)
+        # Пул исчерпан — всё на сегодня рассказано.
+        joke, outcome = await anekdot.random_anecdote()
+        assert joke is None
+        assert outcome is Outcome.EXHAUSTED
+        return got
+
+    got = asyncio.run(run())
+    assert sorted(got) == ["a", "b", "c"]  # каждый ровно раз, без повторов
+
+
+def test_random_anecdote_merges_and_dedups_feeds(monkeypatch, reset_anekdot_state):
+    _patch_feeds(
+        monkeypatch,
+        {
+            anekdot.FEED_URLS[0]: ["a", "b"],
+            anekdot.FEED_URLS[1]: ["b", "c", "d"],  # «b» дублируется между лентами
+        },
+    )
+
+    async def run():
+        seen = set()
+        while True:
+            joke, outcome = await anekdot.random_anecdote()
+            if outcome is not Outcome.OK:
+                break
+            seen.add(joke)
+        return seen
+
+    assert asyncio.run(run()) == {"a", "b", "c", "d"}
+
+
+def test_random_anecdote_unavailable_when_feeds_down(monkeypatch, reset_anekdot_state):
+    _patch_feeds(monkeypatch, {})  # все ленты пустые → недоступны
+
+    async def run():
+        return await anekdot.random_anecdote()
+
+    joke, outcome = asyncio.run(run())
+    assert joke is None
+    assert outcome is Outcome.UNAVAILABLE
