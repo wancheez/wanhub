@@ -12,7 +12,7 @@ from app.core.logging import LOG_DIR, LOG_FILE
 
 router = Router(name="logs")
 
-DEFAULT_LINES = 50
+DEFAULT_LINES = 10
 MAX_LINES = 1000
 TG_LIMIT = 3500  # запас под обёртку <pre> и лимит Telegram в 4096 символов
 

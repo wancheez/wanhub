@@ -7,6 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.bot.auth import ChatWhitelistMiddleware
 from app.bot.handlers import register_handlers
+from app.bot.retry import RetryRequestMiddleware
 from app.core.config import TELEGRAM_ADMIN_ID, TELEGRAM_BOT_TOKEN
 from app.services import blackjack_db, deal_db, image_quota, llm_history
 from app.services.blackjack_weekly import weekly_summary_loop as blackjack_weekly_loop
@@ -45,6 +46,8 @@ async def start_bot() -> None:
         token=TELEGRAM_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode="HTML"),
     )
+    # Универсальный ретрай 429/сетевых сбоев для всех исходящих запросов.
+    bot.session.middleware(RetryRequestMiddleware())
     dp = Dispatcher()
     middleware = ChatWhitelistMiddleware(TELEGRAM_ADMIN_ID)
     dp.message.middleware(middleware)

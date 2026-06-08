@@ -35,18 +35,31 @@ MAX_QUOTED_CHARS = 1000  # cap reply-context quote to keep Claude prompts small
 CHAT_PREFIX_RE = re.compile(r"^\s*чат\b[\s,.:;!?-]*", re.IGNORECASE)
 
 
-def extract_body(text: str, is_private: bool) -> tuple[str | None, bool]:
+def extract_body(
+    text: str, is_private: bool, is_reply_to_bot: bool = False
+) -> tuple[str | None, bool]:
     """Return (body, had_prefix). body is None when the message is not
-    addressed to the bot (group chat without «Чат»). had_prefix is True
-    when the user typed the «Чат» trigger explicitly — used to decide
-    whether to nudge them on an empty body.
+    addressed to the bot (group chat without «Чат» and not a reply to the
+    bot's own message). had_prefix is True when the user typed the «Чат»
+    trigger explicitly — used to decide whether to nudge them on an empty body.
+
+    A reply to the bot's message counts as addressing it: в группе можно
+    ответить на сообщение бота без слова «Чат».
     """
     m = CHAT_PREFIX_RE.match(text)
     if m:
         return text[m.end() :].strip(), True
-    if is_private:
+    if is_private or is_reply_to_bot:
         return text.strip(), False
     return None, False
+
+
+def is_reply_to_bot(message: Message) -> bool:
+    """True, если сообщение — ответ на сообщение нашего же бота."""
+    replied = message.reply_to_message
+    if replied is None or replied.from_user is None or message.bot is None:
+        return False
+    return replied.from_user.id == message.bot.id
 
 
 def format_reply_context(quoted: str | None, author: str | None) -> str | None:
@@ -112,7 +125,7 @@ async def cmd_chat(message: Message, state: FSMContext) -> None:
 async def chat_prefix(message: Message, state: FSMContext) -> None:
     text = message.text or ""
     is_private = message.chat.type == "private"
-    body, had_prefix = extract_body(text, is_private)
+    body, had_prefix = extract_body(text, is_private, is_reply_to_bot(message))
     if body is None:
         return  # group chat without «Чат» trigger — silently ignore
     if not body:
@@ -131,7 +144,7 @@ async def edit_photo(message: Message) -> None:
     """
     caption = message.caption or ""
     is_private = message.chat.type == "private"
-    instruction, had_prefix = extract_body(caption, is_private)
+    instruction, had_prefix = extract_body(caption, is_private, is_reply_to_bot(message))
     if instruction is None:
         return  # группа без «Чат» — молча игнорируем
     if not instruction:

@@ -48,6 +48,18 @@ def test_extract_body_case_insensitive_prefix():
     assert had is True
 
 
+def test_extract_body_group_reply_to_bot_passes_through():
+    body, had = extract_body("а почему так?", is_private=False, is_reply_to_bot=True)
+    assert body == "а почему так?"
+    assert had is False
+
+
+def test_extract_body_group_reply_to_bot_with_prefix_still_strips():
+    body, had = extract_body("Чат, поясни", is_private=False, is_reply_to_bot=True)
+    assert body == "поясни"
+    assert had is True
+
+
 def test_format_basic():
     out = format_reply_context("Привет, как дела?", "Иван")
     assert out == "(в ответ на сообщение от Иван):\n> Привет, как дела?"

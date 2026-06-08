@@ -15,7 +15,6 @@
 
 import asyncio
 import logging
-import re
 from datetime import UTC, datetime
 from html import escape
 
@@ -23,9 +22,6 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramBadRequest,
-    TelegramNetworkError,
-    TelegramRetryAfter,
-    TelegramServerError,
 )
 from aiogram.filters import Command
 from aiogram.types import (
@@ -169,17 +165,12 @@ async def _coalesced_render_runner(bot: Bot, session: deal.DealSession) -> None:
             text, kb = _render_payload(session)
             try:
                 with _suppress_edit_noop():
-                    # Дефолты связывают значения этой итерации (B023): `_with_retry`
-                    # зовёт фабрику синхронно в этом же проходе, но так нагляднее.
-                    await _with_retry(
-                        lambda mid=mid, text=text, kb=kb: bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=mid,
-                            text=text,
-                            parse_mode="HTML",
-                            reply_markup=kb,
-                        ),
-                        what="coalesced edit_text",
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=mid,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=kb,
                     )
             except asyncio.CancelledError:
                 return
@@ -207,38 +198,6 @@ def _cancel_pending_render(chat_id: int) -> None:
 # Длительность пауз драм-реплея в финале. 2 сек — узнаваемо «ТВ»-ритмично,
 # но не так долго, чтобы зритель в чате терял нить.
 _DRAMA_PAUSE_SECONDS = 2.0
-
-# Ретрай транзиентных сбоев Telegram. На Pi с домашним аплинком и в групповом
-# чате, куда игра шлёт сообщения пачками (анонс выбывших + bump + реплика
-# банкира подряд), регулярно ловится флуд-контроль 429, сетевой блип или 5xx.
-# Без ретрая такой сбой ровно посередине перехода фазы оставлял игру без кнопок
-# и без нового сообщения — приходилось вручную возобновлять сессию через /deal.
-_SEND_RETRIES = 3
-
-
-async def _with_retry(coro_factory, *, what: str):
-    """Выполнить Telegram-операцию с ретраем на транзиентных сбоях.
-
-    `coro_factory` — фабрика корутины (вызывается заново на каждую попытку:
-    корутину нельзя await-нуть дважды). На 429 ждём ровно столько, сколько
-    просит Telegram; на сетевых/5xx — короткий нарастающий бэкофф. После
-    исчерпания попыток пробрасываем последнее исключение, чтобы вызывающий
-    залогировал и (где возможно) откатился на старую клавиатуру.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(_SEND_RETRIES):
-        try:
-            return await coro_factory()
-        except TelegramRetryAfter as e:
-            last_exc = e
-            log.info("deal: %s flood-control, retry after %ss", what, e.retry_after)
-            await asyncio.sleep(e.retry_after + 0.5)
-        except (TelegramNetworkError, TelegramServerError) as e:
-            last_exc = e
-            log.info("deal: %s transient error (%s), retry", what, type(e).__name__)
-            await asyncio.sleep(0.5 * (attempt + 1))
-    assert last_exc is not None
-    raise last_exc
 
 
 def _grid_sizes(button_count: int, width: int) -> tuple[int, ...]:
@@ -791,15 +750,6 @@ def _text_end_summary(session: deal.DealSession) -> str:
     return "\n".join(lines)
 
 
-def _podium_caption(session: deal.DealSession) -> str:
-    """Короткая подпись к фото-пьедесталу: шапка + топ-3 без «что если бы»."""
-    lines = _end_header_lines(session)
-    lines.append("")
-    for i, p in enumerate(_ranked_players(session)[:3]):
-        lines.append(_player_line(i, p))
-    return "\n".join(lines)
-
-
 def _podium_sub(p: deal.PlayerState) -> str:
     """Короткая подпись игрока на тумбе (помещается под значением)."""
     if p.status == "dealt":
@@ -841,44 +791,25 @@ def _render_game_podium(
         return None
 
 
-# Лимит подписи к фото в Telegram. Считается по видимому тексту (без HTML-тегов).
-_CAPTION_LIMIT = 1024
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _caption_text_len(html_text: str) -> int:
-    """Грубая длина видимого текста: вырезаем HTML-теги. Запас огромный, так что
-    мелкая погрешность на сущностях (&lt; и т.п.) роли не играет."""
-    return len(_HTML_TAG_RE.sub("", html_text))
-
-
 async def _send_game_result(
     message: Message, session: deal.DealSession, image: bytes | None
 ) -> None:
-    """Отправить итоги партии. Один пост (фото + полный текст подписью), если он
-    влезает в лимит подписи. Иначе — фото с короткой подписью и полный текст
-    отдельным сообщением. Без картинки — просто текст. Дубля не делаем.
+    """Отправить итоги партии: сначала текст результата, затем отдельным
+    сообщением картинку-пьедестал. На флуд-контроле (429) повторяем через
+    указанное Telegram время — финал не должен теряться.
     """
     summary = _text_end_summary(session)
-    photo = BufferedInputFile(image, filename="game.png") if image is not None else None
-
-    if photo is not None and _caption_text_len(summary) <= _CAPTION_LIMIT:
-        try:
-            await message.answer_photo(photo, caption=summary, parse_mode="HTML")
-            return
-        except TelegramAPIError:
-            # Не вышло одним постом — упадём на раздельную отправку ниже.
-            log.exception("deal: photo+full caption failed for chat=%d", session.chat_id)
-
-    if photo is not None:
-        try:
-            await message.answer_photo(photo, caption=_podium_caption(session), parse_mode="HTML")
-        except TelegramAPIError:
-            log.exception("deal: photo+short caption failed for chat=%d", session.chat_id)
     try:
         await message.answer(summary, parse_mode="HTML")
     except TelegramAPIError:
         log.exception("deal: end summary send failed for chat=%d", session.chat_id)
+
+    if image is not None:
+        photo = BufferedInputFile(image, filename="game.png")
+        try:
+            await message.answer_photo(photo)
+        except TelegramAPIError:
+            log.exception("deal: podium photo send failed for chat=%d", session.chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -895,16 +826,10 @@ async def _render(message: Message, session: deal.DealSession, *, edit: bool) ->
     text, kb = _render_payload(session)
     if edit:
         with _suppress_edit_noop():
-            await _with_retry(
-                lambda: message.edit_text(text, parse_mode="HTML", reply_markup=kb),
-                what="edit_text",
-            )
+            await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         session.current_message_id = message.message_id
         return
-    sent = await _with_retry(
-        lambda: message.answer(text, parse_mode="HTML", reply_markup=kb),
-        what="answer",
-    )
+    sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
     session.current_message_id = sent.message_id
 
 
