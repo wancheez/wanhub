@@ -55,7 +55,15 @@ def extract_body(
 
 
 def is_reply_to_bot(message: Message) -> bool:
-    """True, если сообщение — ответ на сообщение нашего же бота."""
+    """True, если сообщение — ответ на сообщение нашего же бота.
+
+    Ручную цитату обращением к боту НЕ считаем. В Telegram цитирование —
+    это технически тот же reply, но с выделенным фрагментом (`message.quote`
+    с `is_manual=True`). Так обычно цитируют реплику бота, чтобы обсудить её
+    между собой, а не написать боту, поэтому на такие сообщения молчим.
+    """
+    if message.quote is not None and message.quote.is_manual:
+        return False
     replied = message.reply_to_message
     if replied is None or replied.from_user is None or message.bot is None:
         return False

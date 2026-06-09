@@ -1,9 +1,47 @@
+from aiogram.types import Chat, Message, TextQuote, User
+
 from app.bot.handlers.chat import (
     MAX_QUOTED_CHARS,
     extract_body,
     format_forward_context,
     format_reply_context,
+    is_reply_to_bot,
 )
+
+BOT_ID = 4242
+
+
+def _bot():
+    return User(id=BOT_ID, is_bot=True, first_name="WanBot")
+
+
+def _make_message(
+    *, reply_from: User | None, quote: TextQuote | None = None
+) -> Message:
+    """Минимальное входящее сообщение-ответ. `reply_from` — автор сообщения,
+    на которое отвечают; `quote` — выделенный фрагмент (ручная цитата)."""
+    chat = Chat(id=-100, type="supergroup")
+    replied = None
+    if reply_from is not None:
+        replied = Message(
+            message_id=1, date=0, chat=chat, from_user=reply_from, text="бот сказал"
+        )
+    msg = Message(
+        message_id=2,
+        date=0,
+        chat=chat,
+        from_user=User(id=7, is_bot=False, first_name="Иван"),
+        text="а почему так?",
+        reply_to_message=replied,
+        quote=quote,
+    )
+    return msg.as_(_make_bot())
+
+
+def _make_bot():
+    from aiogram import Bot
+
+    return Bot(token=f"{BOT_ID}:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
 
 def test_extract_body_group_with_prefix():
@@ -58,6 +96,37 @@ def test_extract_body_group_reply_to_bot_with_prefix_still_strips():
     body, had = extract_body("Чат, поясни", is_private=False, is_reply_to_bot=True)
     assert body == "поясни"
     assert had is True
+
+
+def test_is_reply_to_bot_plain_reply():
+    msg = _make_message(reply_from=_bot())
+    assert is_reply_to_bot(msg) is True
+
+
+def test_is_reply_to_bot_reply_to_human():
+    human = User(id=99, is_bot=False, first_name="Петя")
+    msg = _make_message(reply_from=human)
+    assert is_reply_to_bot(msg) is False
+
+
+def test_is_reply_to_bot_manual_quote_ignored():
+    # Пользователь выделил фрагмент сообщения бота через «Цитировать» —
+    # это не обращение к боту, отвечать не должны.
+    quote = TextQuote(text="сказал", position=0, is_manual=True)
+    msg = _make_message(reply_from=_bot(), quote=quote)
+    assert is_reply_to_bot(msg) is False
+
+
+def test_is_reply_to_bot_auto_quote_still_counts():
+    # Автоматическую цитату (is_manual=False) обращением считаем как обычно.
+    quote = TextQuote(text="сказал", position=0, is_manual=False)
+    msg = _make_message(reply_from=_bot(), quote=quote)
+    assert is_reply_to_bot(msg) is True
+
+
+def test_is_reply_to_bot_no_reply():
+    msg = _make_message(reply_from=None)
+    assert is_reply_to_bot(msg) is False
 
 
 def test_format_basic():
