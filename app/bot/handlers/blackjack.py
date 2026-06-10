@@ -24,7 +24,7 @@ import logging
 from html import escape
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -34,6 +34,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.bot.handlers.common import suppress_edit_noop
 from app.services import blackjack, blackjack_db, deal, games
 
 router = Router(name="blackjack")
@@ -461,7 +462,7 @@ def _render_payload(
 async def _render(message: Message, session: blackjack.BlackjackSession, *, edit: bool) -> None:
     text, kb = _render_payload(session)
     if edit:
-        with _suppress_edit_noop():
+        with suppress_edit_noop():
             await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         session.current_message_id = message.message_id
         return
@@ -471,7 +472,7 @@ async def _render(message: Message, session: blackjack.BlackjackSession, *, edit
 
 async def _bump_phase(prev_message: Message, session: blackjack.BlackjackSession) -> None:
     """Снять клавиатуру со старого сообщения и отправить свежее под текущую фазу."""
-    with _suppress_edit_noop():
+    with suppress_edit_noop():
         await prev_message.edit_reply_markup(reply_markup=None)
     await _render(prev_message, session, edit=False)
 
@@ -602,7 +603,7 @@ async def _animate_dealer_and_finish(message: Message, session: blackjack.Blackj
         # Снять клавиатуру с hole-сообщения (она больше не работает).
         if hole_msg is not None:
             try:
-                with _suppress_edit_noop():
+                with suppress_edit_noop():
                     await hole_msg.edit_reply_markup(reply_markup=None)
             except TelegramAPIError:
                 log.warning("bj: chat=%d failed to strip skip-kb", chat_id)
@@ -698,7 +699,7 @@ async def _resurface_existing(message: Message, session: blackjack.BlackjackSess
     prev_msg_id = session.current_message_id
     if prev_msg_id is not None and message.bot is not None:
         try:
-            with _suppress_edit_noop():
+            with suppress_edit_noop():
                 await message.bot.edit_message_reply_markup(
                     chat_id=session.chat_id,
                     message_id=prev_msg_id,
@@ -1139,7 +1140,7 @@ async def on_cancel(cb: CallbackQuery) -> None:
     _cancel_dealer_task(chat_id)
     blackjack.cancel_session(chat_id)
     assert isinstance(cb.message, Message)
-    with _suppress_edit_noop():
+    with suppress_edit_noop():
         await cb.message.edit_text("Блэкджек отменён. Ставки не списаны.")
     await cb.answer()
 
@@ -1167,13 +1168,3 @@ async def on_skip_dealer(cb: CallbackQuery) -> None:
 @router.callback_query(F.data == _CB_NOOP)
 async def on_noop(cb: CallbackQuery) -> None:
     await cb.answer()
-
-
-class _suppress_edit_noop:
-    """Глотает TelegramBadRequest на edit-операциях (например 'message is not modified')."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return exc_type is not None and issubclass(exc_type, TelegramBadRequest)

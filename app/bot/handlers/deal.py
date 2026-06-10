@@ -19,10 +19,9 @@ import random
 from datetime import UTC, datetime
 from html import escape
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.exceptions import (
     TelegramAPIError,
-    TelegramBadRequest,
 )
 from aiogram.filters import Command
 from aiogram.types import (
@@ -34,6 +33,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.bot.handlers.common import EditCoalescer, suppress_edit_noop
 from app.core.config import TELEGRAM_ADMIN_ID
 from app.services import (
     anekdot,
@@ -122,19 +122,10 @@ def _chat_lock(chat_id: int) -> asyncio.Lock:
     return lock
 
 
-# Коалесинг перерисовок общего сообщения. Когда много игроков жмут кнопки
-# одновременно, каждый клик правил бы один и тот же message_id через edit_text,
-# и Telegram быстро упирается во флуд-контроль одного сообщения: правки уходят
-# в ретраи со sleep, а `cb.answer` (который гасит спиннер на кнопке) ждёт за
-# ними — кнопка «зависает». Поэтому индивидуальный клик теперь только мутирует
-# стейт и сразу отвечает на callback, а перерисовку откладывает: одна таска на
-# чат с маленькой задержкой схлопывает пачку кликов в один edit. Таска читает
-# АКТУАЛЬНЫЙ стейт в момент срабатывания, поэтому опоздавшая правка безопасна —
-# она нарисует последнее состояние, а `dirty`-флаг гарантирует ещё один проход,
-# если клик пришёл уже во время рендера.
+# Коалесинг перерисовок общего сообщения — общий механизм в
+# `app.bot.handlers.common.EditCoalescer` (зачем он нужен — см. докстринг там).
 _RENDER_DEBOUNCE_SECONDS = 0.25
-_render_tasks: dict[int, asyncio.Task[None]] = {}
-_render_dirty: dict[int, bool] = {}
+_render_coalescer = EditCoalescer(_RENDER_DEBOUNCE_SECONDS)
 
 
 def _schedule_render(message: Message, session: deal.DealSession) -> None:
@@ -142,65 +133,41 @@ def _schedule_render(message: Message, session: deal.DealSession) -> None:
     коалес-рендер на этот чат. Дешёвая замена прямому `_render(edit=True)` на
     горячем пути множественных кликов.
     """
-    chat_id = session.chat_id
-    _render_dirty[chat_id] = True
-    existing = _render_tasks.get(chat_id)
-    if existing is not None and not existing.done():
-        return
     bot = message.bot
     if bot is None:
         return
-    _render_tasks[chat_id] = asyncio.create_task(_coalesced_render_runner(bot, session))
-
-
-async def _coalesced_render_runner(bot: Bot, session: deal.DealSession) -> None:
     chat_id = session.chat_id
-    try:
-        while True:
-            try:
-                await asyncio.sleep(_RENDER_DEBOUNCE_SECONDS)
-            except asyncio.CancelledError:
-                return
-            _render_dirty[chat_id] = False
-            # Сессия могла смениться/завершиться, пока ждали — старую не трогаем.
-            if deal.get_session(chat_id) is not session:
-                return
-            mid = session.current_message_id
-            if mid is None:
-                if not _render_dirty.get(chat_id):
-                    return
-                continue
-            text, kb = _render_payload(session)
-            try:
-                with _suppress_edit_noop():
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=mid,
-                        text=text,
-                        parse_mode="HTML",
-                        reply_markup=kb,
-                    )
-            except asyncio.CancelledError:
-                return
-            except TelegramAPIError:
-                log.info("deal: chat=%d coalesced render edit failed (ignored)", chat_id)
-            # Накопилось ещё за время правки — ещё проход; иначе выходим.
-            if not _render_dirty.get(chat_id):
-                return
-    finally:
-        if _render_tasks.get(chat_id) is asyncio.current_task():
-            _render_tasks.pop(chat_id, None)
+
+    async def _edit() -> bool:
+        # Сессия могла смениться/завершиться, пока ждали — старую не трогаем.
+        if deal.get_session(chat_id) is not session:
+            return False
+        mid = session.current_message_id
+        if mid is None:
+            return True  # сообщения ещё нет; коалесер сам решит, нужен ли ещё проход
+        text, kb = _render_payload(session)
+        try:
+            with suppress_edit_noop():
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+        except TelegramAPIError:
+            log.info("deal: chat=%d coalesced render edit failed (ignored)", chat_id)
+        return True
+
+    _render_coalescer.schedule(chat_id, _edit)
 
 
 def _cancel_pending_render(chat_id: int) -> None:
     """Снять отложенный коалес-рендер перед авторитетным переходом (bump/финал/
     отмена), чтобы поздняя правка не нарисовала неактуальное состояние поверх
-    свежего сообщения. Себя не отменяем (на случай вызова из самой таски).
+    свежего сообщения.
     """
-    _render_dirty.pop(chat_id, None)
-    task = _render_tasks.pop(chat_id, None)
-    if task is not None and not task.done() and task is not asyncio.current_task():
-        task.cancel()
+    _render_coalescer.cancel(chat_id)
 
 
 # Длительность пауз драм-реплея в финале. 2 сек — узнаваемо «ТВ»-ритмично,
@@ -840,7 +807,7 @@ async def _render(message: Message, session: deal.DealSession, *, edit: bool) ->
     """
     text, kb = _render_payload(session)
     if edit:
-        with _suppress_edit_noop():
+        with suppress_edit_noop():
             await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         session.current_message_id = message.message_id
         return
@@ -867,7 +834,7 @@ async def _bump_phase(prev_message: Message, session: deal.DealSession) -> None:
     """
     await _render(prev_message, session, edit=False)
     try:
-        with _suppress_edit_noop():
+        with suppress_edit_noop():
             await prev_message.edit_reply_markup(reply_markup=None)
     except TelegramAPIError:
         log.info("deal: chat=%d bump: stale kb strip failed (ignored)", session.chat_id)
@@ -880,22 +847,28 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
     вызывать в любой фазе: если условие готовности не выполнено, ничего не
     делает и возвращает False.
 
-    Тело под per-chat локом: два одновременных «Далее» (или клик + авто-таймер)
-    не должны переплести переход. Все проверки фазы и `finalize_*` синхронны и
-    выполняются до первого await под локом, так что второй вошедший увидит уже
-    сменившуюся фазу и тихо вернёт False.
+    Мутации фазы — под per-chat локом: два одновременных «Далее» (или клик +
+    авто-таймер) не должны переплести переход. Проверки фазы и `finalize_*`
+    синхронны, так что второй вошедший увидит уже сменившуюся фазу и тихо
+    вернёт False. Сетевой I/O (bump, анонсы, финализация) выполняется ПОСЛЕ
+    отпускания лока: ретраи флуд-контроля могут держать соединение секундами,
+    и всё это время остальные клики «Далее» висели бы на локе со спиннером.
+    Повторный вход за это время безопасен — фаза уже переключена.
     """
+    just_dealt: list[tuple[str, int]] = []
+    finalize_res: deal.FinalizeResult | None = None
     async with _chat_lock(session.chat_id):
+        # Сессию могли отменить/пересоздать, пока ждали лок — чужую не трогаем.
+        if deal.get_session(session.chat_id) is not session:
+            return False
         if session.phase is deal.DealPhase.OPENING and deal.is_round_complete(session):
             # Банкер работает на КАЖДОМ раунде, включая последний (там он
             # торгуется на 2 закрытых кейса — личный + один на столе). Те, кто
             # откажется, пойдут в FINAL_SWAP через `finalize_banker`.
             deal.transition_to_banker(session)
             _cancel_pending_render(session.chat_id)  # старое сообщение уезжает
-            await _bump_phase(message, session)
-            _start_banker_voice(message, session)
-            return True
-        if session.phase is deal.DealPhase.BANKER and deal.all_active_decided(session):
+            step = "to_banker"
+        elif session.phase is deal.DealPhase.BANKER and deal.all_active_decided(session):
             # Кто только что взял Deal — нужно для drop-out анимации. Считаем
             # до finalize_banker: иначе у dealt-игроков status уже станет "dealt"
             # и difference не вычислить (но проще — пройтись по round_decisions).
@@ -909,24 +882,35 @@ async def _try_advance(message: Message, session: deal.DealSession) -> bool:
             ]
             finalize_res = deal.finalize_banker(session)
             _cancel_pending_render(session.chat_id)
-            if just_dealt:
-                await _announce_dropouts(message, just_dealt)
-            if finalize_res is deal.FinalizeResult.OK_NEXT_ROUND:
-                await _bump_phase(message, session)
-            elif finalize_res is deal.FinalizeResult.OK_FINAL_SWAP:
-                # Те, кто отказался от финального офера, голосуют за SWAP. Без
-                # авто-таймера — обмен в финале слишком значимое решение, чтобы
-                # дефолтить за молчуна; ждём явный клик каждого активного.
-                await _bump_phase(message, session)
-            else:  # OK_FINISHED
-                await _finalize_and_summarize(message, session)
-            return True
-        if session.phase is deal.DealPhase.FINAL_SWAP and deal.all_active_decided_swap(session):
+            step = "from_banker"
+        elif session.phase is deal.DealPhase.FINAL_SWAP and deal.all_active_decided_swap(session):
             deal.finalize_swap(session)
             _cancel_pending_render(session.chat_id)
+            step = "finish"
+        else:
+            return False
+
+    if step == "to_banker":
+        await _bump_phase(message, session)
+        _start_banker_voice(message, session)
+        return True
+    if step == "from_banker":
+        if just_dealt:
+            await _announce_dropouts(message, just_dealt)
+        if finalize_res in (
+            deal.FinalizeResult.OK_NEXT_ROUND,
+            # Те, кто отказался от финального офера, голосуют за SWAP. Без
+            # авто-таймера — обмен в финале слишком значимое решение, чтобы
+            # дефолтить за молчуна; ждём явный клик каждого активного.
+            deal.FinalizeResult.OK_FINAL_SWAP,
+        ):
+            await _bump_phase(message, session)
+        else:  # OK_FINISHED
             await _finalize_and_summarize(message, session)
-            return True
-        return False
+        return True
+    # step == "finish"
+    await _finalize_and_summarize(message, session)
+    return True
 
 
 async def _announce_dropouts(message: Message, just_dealt: list[tuple[str, int]]) -> None:
@@ -950,6 +934,19 @@ async def _announce_dropouts(message: Message, just_dealt: list[tuple[str, int]]
         await message.answer(text, parse_mode="HTML")
     except TelegramAPIError:
         log.exception("deal: dropout announcement failed")
+
+
+def _cleanup_chat_state(chat_id: int) -> None:
+    """Убрать per-chat записи из модульных словарей по окончании партии.
+
+    Таски и dirty-флаги снимают `_cancel_*`-хелперы, лок выкидываем отдельно:
+    без этого `_chat_locks` рос бы на каждый новый чат бесконечно (бот живёт
+    неделями между рестартами). Ожидающие старый лок не страдают: захватив его,
+    они первым делом сверяют сессию через `deal.get_session` и выходят.
+    """
+    _cancel_auto_advance(chat_id)
+    _cancel_pending_render(chat_id)
+    _chat_locks.pop(chat_id, None)
 
 
 def _cancel_auto_advance(chat_id: int) -> None:
@@ -994,6 +991,10 @@ def _start_auto_advance(message: Message, session: deal.DealSession) -> None:
             return
         try:
             advanced = await _try_advance(message, session)
+            # Перепроверяем ПОСЛЕ await: за время перехода могли отменить
+            # партию и начать новую — её сообщение трогать нельзя.
+            if deal.get_session(chat_id) is not session:
+                return
             if not advanced:
                 # Условие готовности «уплыло» — рефрешим сообщение под актуальное.
                 await _render(message, session, edit=True)
@@ -1151,7 +1152,7 @@ def _start_banker_voice(message: Message, session: deal.DealSession) -> None:
                 ]
         text, kb = _render_payload(session)
         try:
-            with _suppress_edit_noop():
+            with suppress_edit_noop():
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=target_message_id,
@@ -1247,7 +1248,7 @@ async def _resurface_existing(message: Message, session: deal.DealSession) -> No
     prev_msg_id = session.current_message_id
     if prev_msg_id is not None and message.bot is not None:
         try:
-            with _suppress_edit_noop():
+            with suppress_edit_noop():
                 await message.bot.edit_message_reply_markup(
                     chat_id=session.chat_id,
                     message_id=prev_msg_id,
@@ -1291,9 +1292,8 @@ async def cmd_dealcancel(message: Message) -> None:
     if message.from_user is not None and message.from_user.id != session.starter_id:
         await message.answer("Отменить может только тот, кто запустил.")
         return
-    _cancel_auto_advance(chat_id)
-    _cancel_pending_render(chat_id)
     deal.cancel_session(chat_id)
+    _cleanup_chat_state(chat_id)
     await message.answer("«Сделка» отменена.")
 
 
@@ -1853,11 +1853,10 @@ async def on_cancel(cb: CallbackQuery) -> None:
     if cb.from_user.id != session.starter_id:
         await cb.answer("Только стартер.", show_alert=False)
         return
-    _cancel_auto_advance(chat_id)
-    _cancel_pending_render(chat_id)
     deal.cancel_session(chat_id)
+    _cleanup_chat_state(chat_id)
     assert isinstance(cb.message, Message)
-    with _suppress_edit_noop():
+    with suppress_edit_noop():
         await cb.message.edit_text("«Сделка» отменена.")
     await cb.answer()
 
@@ -1904,6 +1903,14 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
     сессия зависала в `FINISHED` и повторный `/deal` бесконечно перерисовывал
     «🎰 Раскрываем итог…», не двигаясь дальше.
     """
+    # Защёлка от двойной финализации: сюда могут прийти одновременно авто-таймер
+    # и ручной клик, либо два /deal по зависшей FINISHED-сессии. Проверка и
+    # установка синхронны (до первого await), так что второй вызов выходит сразу
+    # и не дублирует summary/запись в БД.
+    if session.finalize_started:
+        return
+    session.finalize_started = True
+
     # На время реплея гасим внешние таймеры: LLM-таска не должна дописать
     # реплику банкира в уже-замороженное сообщение, а авто-таймер — повторить
     # переход. До записи в БД оба должны быть мертвы. Отложенный коалес-рендер
@@ -1914,7 +1921,7 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
 
     try:
         # Доска — последняя картина состояния, без клавиатуры.
-        with _suppress_edit_noop():
+        with suppress_edit_noop():
             await message.edit_text(
                 _text_finished_board(session), parse_mode="HTML", reply_markup=None
             )
@@ -1952,6 +1959,7 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
             )
     finally:
         deal.cancel_session(session.chat_id)
+        _cleanup_chat_state(session.chat_id)
 
 
 async def _drama_replay(message: Message, session: deal.DealSession) -> None:
@@ -1993,13 +2001,3 @@ async def _drama_replay(message: Message, session: deal.DealSession) -> None:
         # Если внешний код отменил нас (например, /dealcancel в процессе),
         # просто выходим — финальный summary всё равно идёт в следующем шаге.
         raise
-
-
-class _suppress_edit_noop:
-    """Глотает TelegramBadRequest на edit-операциях (например 'message is not modified')."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return exc_type is not None and issubclass(exc_type, TelegramBadRequest)

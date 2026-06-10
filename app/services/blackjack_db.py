@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.core.config import BLACKJACK_DB_PATH
+from app.services import sqlite_utils
 
 log = logging.getLogger("app")
 
@@ -139,6 +140,7 @@ def _get_connection() -> sqlite3.Connection:
         uri = f"file:{BLACKJACK_DB_PATH}?mode=rwc"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        sqlite_utils.configure_connection(conn)
         with conn:
             conn.executescript(_SCHEMA_SQL)
     except (sqlite3.Error, OSError) as e:
@@ -304,6 +306,13 @@ def record_outcome(
             outcome,
         )
     except (sqlite3.Error, BlackjackDBUnavailable, OSError) as e:
+        # Транзиентная блокировка (параллельный бэкап) пройдёт сама — теряем
+        # одну запись, но БД не отключаем.
+        if sqlite_utils.is_transient_error(e):
+            log.warning(
+                "blackjack_db: record_outcome failed transiently (%s) — запись пропущена", e
+            )
+            return
         _unavailable = True
         log.warning(
             "blackjack_db: record_outcome failed (%s) — статистика отключена до рестарта",

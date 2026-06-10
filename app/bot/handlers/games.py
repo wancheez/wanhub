@@ -30,6 +30,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.bot.handlers.common import EditCoalescer
 from app.core.config import MAX_QUIZ_QUESTIONS
 from app.services import blackjack, deal, games
 
@@ -56,52 +57,26 @@ _KIND_TITLE: dict[games.GameKind, str] = {
     games.GameKind.CAPITAL: "🏙️ Столицы",
 }
 
-# Коалесинг обновлений подписи вопроса. Апдейты aiogram обрабатываются
-# параллельными тасками (handle_as_tasks=True, без лимита), поэтому когда
-# несколько игроков отвечают одновременно, каждый ответ правил бы один и тот
-# же message через edit_caption/edit_text. Telegram быстро упирается во
-# флуд-контроль одного сообщения: правки уходят в ретраи, а `cb.answer`
-# (гасящий спиннер) ждёт за ними — кнопка «зависает». Поэтому ответ теперь
-# сразу гасит спиннер, а перерисовку «Ответили: …» откладывает: одна таска на
-# чат с маленькой задержкой схлопывает пачку ответов в одну правку. Таска
-# читает АКТУАЛЬНЫЙ стейт в момент срабатывания, `dirty`-флаг гарантирует ещё
-# проход, если ответ пришёл уже во время правки.
+# Коалесинг обновлений подписи вопроса (списка «Ответили: …») — общий
+# механизм в `app.bot.handlers.common.EditCoalescer` (зачем — см. докстринг там).
 _REFRESH_DEBOUNCE_SECONDS = 0.25
 _REFRESH_RETRIES = 3
-_refresh_tasks: dict[int, asyncio.Task[None]] = {}
-_refresh_dirty: dict[int, bool] = {}
+_refresh_coalescer = EditCoalescer(_REFRESH_DEBOUNCE_SECONDS)
 
 
 def _schedule_refresh(bot: Bot, chat_id: int) -> None:
     """Отметить подпись текущего вопроса «грязной» и (если ещё нет) запустить
     отложенный коалес-рефреш на этот чат.
     """
-    _refresh_dirty[chat_id] = True
-    existing = _refresh_tasks.get(chat_id)
-    if existing is not None and not existing.done():
-        return
-    _refresh_tasks[chat_id] = asyncio.create_task(_coalesced_refresh_runner(bot, chat_id))
 
+    async def _edit() -> bool:
+        game = games.get_game(chat_id)
+        if game is None or game.is_finished or game.active_message_id is None:
+            return True  # вопрос ещё/уже не на экране; правка не нужна
+        await _edit_question_caption(bot, game)
+        return True
 
-async def _coalesced_refresh_runner(bot: Bot, chat_id: int) -> None:
-    try:
-        while True:
-            try:
-                await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS)
-            except asyncio.CancelledError:
-                return
-            _refresh_dirty[chat_id] = False
-            game = games.get_game(chat_id)
-            if game is None or game.is_finished or game.active_message_id is None:
-                if not _refresh_dirty.get(chat_id):
-                    return
-                continue
-            await _edit_question_caption(bot, game)
-            if not _refresh_dirty.get(chat_id):
-                return
-    finally:
-        if _refresh_tasks.get(chat_id) is asyncio.current_task():
-            _refresh_tasks.pop(chat_id, None)
+    _refresh_coalescer.schedule(chat_id, _edit)
 
 
 async def _edit_question_caption(bot: Bot, game: games.Game) -> None:
@@ -155,10 +130,7 @@ def _cancel_pending_refresh(chat_id: int) -> None:
     """Снять отложенный коалес-рефреш перед авторитетным переходом (следующий
     вопрос / финал / стоп), чтобы поздняя правка не нарисовала старый раунд.
     """
-    _refresh_dirty.pop(chat_id, None)
-    task = _refresh_tasks.pop(chat_id, None)
-    if task is not None and not task.done() and task is not asyncio.current_task():
-        task.cancel()
+    _refresh_coalescer.cancel(chat_id)
 
 
 @router.message(Command("flags"))

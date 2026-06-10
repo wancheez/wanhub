@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -127,7 +128,8 @@ async def chat(
     user_language: str | None = None,
 ) -> str:
     """Telegram chat: history keyed by chat_id."""
-    history = load_history(chat_id, MAX_HISTORY_MESSAGES - 1)
+    # SQLite-вызовы синхронные — уводим их в thread pool, чтобы не блокировать event loop.
+    history = await asyncio.to_thread(load_history, chat_id, MAX_HISTORY_MESSAGES - 1)
     system = _system_prompt(
         chat_type,
         chat_title=chat_title,
@@ -137,7 +139,7 @@ async def chat(
     reply = await _call_anthropic(history, user_message, system)
 
     # Persist the round-trip only on success — failed calls don't pollute history.
-    append_message(chat_id, "user", user_message)
+    await asyncio.to_thread(append_message, chat_id, "user", user_message)
     if reply:
-        append_message(chat_id, "assistant", reply)
+        await asyncio.to_thread(append_message, chat_id, "assistant", reply)
     return reply

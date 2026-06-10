@@ -15,6 +15,7 @@ import time
 from contextlib import suppress
 
 from app.core.config import LLM_HISTORY_DB_PATH
+from app.services import sqlite_utils
 from app.services.alias import GeneratedAlias
 from app.services.games import normalize_text_answer
 from app.services.llm_quiz import GeneratedQuestion
@@ -119,6 +120,7 @@ def _get_connection() -> sqlite3.Connection:
         uri = f"file:{LLM_HISTORY_DB_PATH}?mode=rwc"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        sqlite_utils.configure_connection(conn)
         with conn:
             conn.executescript(_SCHEMA_SQL)
     except (sqlite3.Error, OSError) as e:
@@ -357,5 +359,10 @@ def _prune_quiz_history(conn: sqlite3.Connection, chat_id: int, topic_norm: str)
 
 def _mark_unavailable(op: str, exc: Exception) -> None:
     global _unavailable
+    # Транзиентная блокировка (параллельный бэкап) пройдёт сама — пропускаем
+    # одну операцию, AVOID-список не отключаем.
+    if sqlite_utils.is_transient_error(exc):
+        log.warning("llm_history: %s failed transiently (%s) — операция пропущена", op, exc)
+        return
     _unavailable = True
     log.warning("llm_history: %s failed (%s) — AVOID отключён до рестарта", op, exc)

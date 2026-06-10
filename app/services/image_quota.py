@@ -15,6 +15,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta, timezone
 
 from app.core.config import IMAGE_QUOTA_DB_PATH
+from app.services import sqlite_utils
 
 log = logging.getLogger("app")
 
@@ -85,6 +86,7 @@ def _get_connection() -> sqlite3.Connection:
     uri = f"file:{IMAGE_QUOTA_DB_PATH}?mode=rwc"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    sqlite_utils.configure_connection(conn)
     with conn:
         conn.executescript(_SCHEMA_SQL)
     _conn = conn
@@ -104,6 +106,10 @@ def used_today(user_id: int) -> int:
         )
         row = cur.fetchone()
     except (sqlite3.Error, OSError) as e:
+        # Транзиентная блокировка пройдёт сама — лимит не отключаем.
+        if sqlite_utils.is_transient_error(e):
+            log.warning("image_quota: used_today failed transiently (%s)", e)
+            return 0
         _unavailable = True
         log.warning("image_quota: used_today failed (%s) — лимит отключён", e)
         return 0
@@ -132,6 +138,10 @@ def increment(user_id: int) -> int:
             )
             row = cur.fetchone()
     except (sqlite3.Error, OSError) as e:
+        # Транзиентная блокировка пройдёт сама — лимит не отключаем.
+        if sqlite_utils.is_transient_error(e):
+            log.warning("image_quota: increment failed transiently (%s)", e)
+            return 0
         _unavailable = True
         log.warning("image_quota: increment failed (%s) — лимит отключён", e)
         return 0

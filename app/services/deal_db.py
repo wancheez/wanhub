@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.core.config import DEAL_STATS_DB_PATH
+from app.services import sqlite_utils
 
 log = logging.getLogger("app")
 
@@ -151,6 +152,7 @@ def _get_connection() -> sqlite3.Connection:
         uri = f"file:{DEAL_STATS_DB_PATH}?mode=rwc"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        sqlite_utils.configure_connection(conn)
         with conn:
             conn.executescript(_SCHEMA_SQL)
             _migrate_outcomes(conn)
@@ -238,8 +240,12 @@ def record_outcome(
             swap_kept,
         )
     except (sqlite3.Error, DealStatsDBUnavailable, OSError) as e:
-        # Один сбой — глушим, статистика по конкретной партии теряется,
-        # но игра уже отыграна и сообщение в чате уже показано.
+        # Транзиентная блокировка (параллельный бэкап) пройдёт сама — теряем
+        # одну запись, но БД не отключаем. Постоянный сбой (права, повреждение
+        # файла) — глушим до рестарта; игра уже отыграна и показана в чате.
+        if sqlite_utils.is_transient_error(e):
+            log.warning("deal_db: record_outcome failed transiently (%s) — запись пропущена", e)
+            return
         _unavailable = True
         log.warning("deal_db: record_outcome failed (%s) — статистика отключена до рестарта", e)
 
