@@ -296,56 +296,64 @@ def test_mark_adhoc_reset_is_per_chat(fresh_db: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Общий (накопительный) рейтинг по призовым местам — global_top_for_chat
+# Общий (накопительный) рейтинг по итогам периодов — period_results
 # ---------------------------------------------------------------------------
 
 
 def test_global_top_counts_places_and_points(fresh_db: Path) -> None:
-    # Анна: 1-е + 2-е = 3+2 = 5 очков
-    deal_db.record_outcome(42, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0, place=1)
-    deal_db.record_outcome(42, 1, "Анна", 50, dealt=True, case_count=22, round_idx=0, place=2)
-    # Борис: 1-е + 3-е = 3+1 = 4 очка
-    deal_db.record_outcome(42, 2, "Борис", 200, dealt=True, case_count=22, round_idx=0, place=1)
-    deal_db.record_outcome(42, 2, "Борис", 10, dealt=True, case_count=22, round_idx=0, place=3)
+    # Период 1: Анна 1-е, Борис 2-е. Период 2: Борис 1-е, Анна 2-е.
+    deal_db.record_period_results(
+        42, "2026-05-17T18:00:00+00:00", [(1, "Анна", 1), (2, "Борис", 2)]
+    )
+    deal_db.record_period_results(
+        42, "2026-05-24T18:00:00+00:00", [(2, "Борис", 1), (1, "Анна", 2)]
+    )
 
     rows = deal_db.global_top_for_chat(42, limit=10)
+    # У обоих по 5 очков (3+2), тай-брейк: оба по 1 золоту → по серебру равны →
+    # по имени: «Анна» < «Борис».
     assert [r.user_name for r in rows] == ["Анна", "Борис"]
     anna = rows[0]
     assert (anna.golds, anna.silvers, anna.bronzes) == (1, 1, 0)
     assert anna.points == 5
-    assert anna.games == 2
-    boris = rows[1]
-    assert (boris.golds, boris.silvers, boris.bronzes) == (1, 0, 1)
-    assert boris.points == 4
+    assert anna.periods == 2
 
 
-def test_global_top_ignores_null_place(fresh_db: Path) -> None:
-    # Запись без места (старый формат) не должна влиять на рейтинг.
+def test_global_top_empty_without_periods(fresh_db: Path) -> None:
+    # Сыгранные партии сами по себе не дают общий рейтинг — нужен закрытый период.
     deal_db.record_outcome(42, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0)
     assert deal_db.global_top_for_chat(42, limit=10) == []
-    # А с местом — появляется.
-    deal_db.record_outcome(42, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    deal_db.record_period_results(42, "2026-05-17T18:00:00+00:00", [(1, "Анна", 1)])
     rows = deal_db.global_top_for_chat(42, limit=10)
     assert len(rows) == 1
     assert rows[0].points == 3
-    assert rows[0].games == 1  # NULL-запись не учтена
+    assert rows[0].periods == 1
+
+
+def test_global_top_idempotent_on_same_period(fresh_db: Path) -> None:
+    # Повторная запись того же периода (catch-up) не задваивает места.
+    placements = [(1, "Анна", 1), (2, "Борис", 2), (3, "Чарли", 3)]
+    deal_db.record_period_results(42, "2026-05-17T18:00:00+00:00", placements)
+    deal_db.record_period_results(42, "2026-05-17T18:00:00+00:00", placements)
+    rows = deal_db.global_top_for_chat(42, limit=10)
+    anna = next(r for r in rows if r.user_name == "Анна")
+    assert anna.golds == 1
+    assert anna.points == 3
 
 
 def test_global_top_orders_by_points_then_medals(fresh_db: Path) -> None:
     # Оба по 6 очков: у «Голда» — два золота, у «Сильвера» — три серебра.
-    deal_db.record_outcome(42, 1, "Голд", 100, dealt=True, case_count=22, round_idx=0, place=1)
-    deal_db.record_outcome(42, 1, "Голд", 100, dealt=True, case_count=22, round_idx=0, place=1)
-    for _ in range(3):
-        deal_db.record_outcome(
-            42, 2, "Сильвер", 50, dealt=True, case_count=22, round_idx=0, place=2
-        )
+    deal_db.record_period_results(42, "2026-05-17T18:00:00+00:00", [(1, "Голд", 1)])
+    deal_db.record_period_results(42, "2026-05-24T18:00:00+00:00", [(1, "Голд", 1)])
+    for end in ("2026-05-17T18:00:00+00:00", "2026-05-24T18:00:00+00:00", "2026-05-31T18:00:00+00:00"):
+        deal_db.record_period_results(42, end, [(2, "Сильвер", 2)])
     rows = deal_db.global_top_for_chat(42, limit=10)
     assert rows[0].points == rows[1].points == 6
     assert rows[0].user_name == "Голд"  # больше золота → выше
 
 
 def test_global_top_isolated_per_chat(fresh_db: Path) -> None:
-    deal_db.record_outcome(1, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0, place=1)
-    deal_db.record_outcome(2, 2, "Борис", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    deal_db.record_period_results(1, "2026-05-17T18:00:00+00:00", [(1, "Анна", 1)])
+    deal_db.record_period_results(2, "2026-05-17T18:00:00+00:00", [(2, "Борис", 1)])
     assert [r.user_name for r in deal_db.global_top_for_chat(1, limit=10)] == ["Анна"]
     assert [r.user_name for r in deal_db.global_top_for_chat(2, limit=10)] == ["Борис"]

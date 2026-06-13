@@ -1418,8 +1418,7 @@ async def cmd_dealglobal(message: Message) -> None:
         lines.append(
             f"{prefix} <b>{escape(r.user_name)}</b> · "
             f"<b>{r.points}</b> очк. · "
-            f"🥇{r.golds} 🥈{r.silvers} 🥉{r.bronzes} · "
-            f"{r.games} партий"
+            f"🥇{r.golds} 🥈{r.silvers} 🥉{r.bronzes}"
         )
     text = "\n".join(lines)
     avatars = (
@@ -2022,11 +2021,10 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
         image = _render_game_podium(session, avatars)
         await _send_game_result(message, session, image)
 
-        # Места считаем по тому же ранжированию, что и пьедестал партии
-        # (_ranked_players: убывание выигрыша, тай-брейк по имени). Игроки, не
-        # сыгравшие (отмена и т.п.), в рейтинг не попадают и место не получают.
-        ranked = [p for p in _ranked_players(session) if p.status in ("dealt", "won_final")]
-        for idx, p in enumerate(ranked):
+        for p in session.players.values():
+            if p.status not in ("dealt", "won_final"):
+                # Игрок присоединился, но не сыграл (например, отмена) — пропускаем.
+                continue
             deal_db.record_outcome(
                 chat_id=session.chat_id,
                 user_id=p.user_id,
@@ -2038,7 +2036,6 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
                 used_swap=(p.swap_kept is not None),
                 swap_kept=p.swap_kept,
                 offer_history=list(session.offer_history) if session.offer_history else None,
-                place=idx + 1,
             )
     finally:
         deal.cancel_session(session.chat_id)

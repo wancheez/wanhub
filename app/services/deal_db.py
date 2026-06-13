@@ -37,6 +37,7 @@ __all__ = [
     "mark_adhoc_reset",
     "mark_weekly_reset",
     "record_outcome",
+    "record_period_results",
     "reset_cache",
     "top_for_chat",
     "top_for_chat_avg",
@@ -69,15 +70,15 @@ class BestGameRow:
 
 @dataclass(frozen=True)
 class GlobalLeaderRow:
-    """Строка общего (накопительного, без сброса) рейтинга по призовым местам."""
+    """Строка общего (накопительного) рейтинга по призовым местам в периодах."""
 
     user_id: int
     user_name: str
-    golds: int  # 1-е места
+    golds: int  # 1-е места по итогам периодов
     silvers: int  # 2-е места
     bronzes: int  # 3-и места
     points: int  # 3 за 1-е, 2 за 2-е, 1 за 3-е
-    games: int  # всего партий с известным местом
+    periods: int  # всего призовых мест (golds + silvers + bronzes)
 
 
 _conn: sqlite3.Connection | None = None
@@ -120,6 +121,21 @@ CREATE TABLE IF NOT EXISTS deal_adhoc_resets (
     PRIMARY KEY (chat_id, at_utc)
 );
 CREATE INDEX IF NOT EXISTS idx_deal_adhoc_chat ON deal_adhoc_resets(chat_id, at_utc);
+
+-- Призёры закрытых периодов (для общего/накопительного рейтинга /dealglobal).
+-- Одна строка на (чат, период, игрок). `period_end_utc` — момент закрытия
+-- периода (воскресная граница либо ad-hoc-момент), он же ключ идемпотентности:
+-- повторная публикация того же периода (catch-up) не задваивает места.
+-- `place` — призовое место в недельном топе периода (1=победа, 2, 3).
+CREATE TABLE IF NOT EXISTS period_results (
+    chat_id        INTEGER NOT NULL,
+    period_end_utc TEXT NOT NULL,
+    user_id        INTEGER NOT NULL,
+    user_name      TEXT NOT NULL,
+    place          INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, period_end_utc, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_period_results_chat ON period_results(chat_id);
 """
 
 
@@ -190,9 +206,6 @@ def _migrate_outcomes(conn: sqlite3.Connection) -> None:
         ("used_swap", "INTEGER"),
         ("swap_kept", "INTEGER"),
         ("offer_history", "TEXT"),
-        # Призовое место в партии (1/2/3...), для общего рейтинга. NULL у старых
-        # записей до бэкафилла (scripts/backfill_deal_places.py).
-        ("place", "INTEGER"),
     ]
     for name, sql_type in additions:
         if name in existing:
@@ -213,7 +226,6 @@ def record_outcome(
     used_swap: bool | None = None,
     swap_kept: bool | None = None,
     offer_history: list[int] | None = None,
-    place: int | None = None,
 ) -> None:
     """Записать исход одной партии для одного игрока. No-op при недоступности.
 
@@ -221,9 +233,6 @@ def record_outcome(
     расширенные колонки (см. `_migrate_outcomes`). Все три nullable: NULL
     означает «фича не применялась» (например, игрок взял Deal до FINAL_SWAP,
     или партия из старого формата без истории оферов).
-
-    `place` — призовое место в партии (1=победа, 2, 3...) для общего рейтинга.
-    NULL означает «место неизвестно» (старый формат до бэкафилла).
     """
     global _unavailable
     if _unavailable:
@@ -235,9 +244,8 @@ def record_outcome(
                 """
                 INSERT INTO outcomes
                   (chat_id, user_id, user_name, winnings, dealt, case_count,
-                   round_idx, finished_at, used_swap, swap_kept, offer_history,
-                   place)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   round_idx, finished_at, used_swap, swap_kept, offer_history)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -251,7 +259,6 @@ def record_outcome(
                     None if used_swap is None else (1 if used_swap else 0),
                     None if swap_kept is None else (1 if swap_kept else 0),
                     json.dumps(offer_history) if offer_history else None,
-                    None if place is None else int(place),
                 ),
             )
         log.info(
@@ -411,13 +418,54 @@ def top_for_chat_avg(
     ]
 
 
-def global_top_for_chat(chat_id: int, *, limit: int) -> list[GlobalLeaderRow]:
-    """Общий (накопительный, без сброса) рейтинг чата по призовым местам.
+def record_period_results(
+    chat_id: int,
+    period_end_utc: str,
+    placements: list[tuple[int, str, int]],
+) -> None:
+    """Записать призёров закрытого периода. No-op при недоступности.
 
-    Учитываются только записи с известным `place` (старые до бэкафилла — NULL —
-    игнорируются). Очки: 3 за 1-е место, 2 за 2-е, 1 за 3-е. Сортировка:
-    points DESC, затем по числу золота/серебра/бронзы, тай-брейк по имени.
-    Имя — из самой свежей записи игрока.
+    `placements` — список `(user_id, user_name, place)` (топ-3 недельного итога).
+    Идемпотентно: ключ (chat_id, period_end_utc, user_id) + INSERT OR IGNORE,
+    так что повторная публикация того же периода (catch-up) не задваивает.
+    """
+    global _unavailable
+    if _unavailable or not placements:
+        return
+    try:
+        conn = _get_connection()
+        with conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO period_results
+                  (chat_id, period_end_utc, user_id, user_name, place)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (chat_id, period_end_utc, int(uid), name, int(place))
+                    for uid, name, place in placements
+                ],
+            )
+        log.info(
+            "deal_db: recorded %d period placements chat=%d period=%s",
+            len(placements),
+            chat_id,
+            period_end_utc,
+        )
+    except (sqlite3.Error, DealStatsDBUnavailable, OSError) as e:
+        if sqlite_utils.is_transient_error(e):
+            log.warning("deal_db: record_period_results failed transiently (%s) — пропущено", e)
+            return
+        _unavailable = True
+        log.warning("deal_db: record_period_results failed (%s) — статистика отключена", e)
+
+
+def global_top_for_chat(chat_id: int, *, limit: int) -> list[GlobalLeaderRow]:
+    """Общий (накопительный, без сброса) рейтинг чата по призовым местам периодов.
+
+    Считает 1/2/3 места по итогам закрытых периодов (`period_results`). Очки:
+    3 за 1-е место, 2 за 2-е, 1 за 3-е. Сортировка: points DESC, затем по числу
+    золота/серебра/бронзы, тай-брейк по имени. Имя — из самого свежего периода.
     """
     if _unavailable:
         return []
@@ -432,22 +480,21 @@ def global_top_for_chat(chat_id: int, *, limit: int) -> list[GlobalLeaderRow]:
                        SUM(CASE WHEN place = 3 THEN 1 ELSE 0 END) AS bronzes,
                        SUM(CASE place WHEN 1 THEN 3 WHEN 2 THEN 2 WHEN 3 THEN 1
                                       ELSE 0 END) AS points,
-                       COUNT(*)         AS games,
-                       MAX(finished_at) AS last_finished
-                FROM outcomes
+                       COUNT(*)            AS periods,
+                       MAX(period_end_utc) AS last_period
+                FROM period_results
                 WHERE chat_id = ?
-                  AND place IS NOT NULL
                 GROUP BY user_id
                 HAVING points > 0
             )
             SELECT
                 agg.user_id,
-                (SELECT user_name FROM outcomes o
-                  WHERE o.chat_id = ?
-                    AND o.user_id = agg.user_id
-                    AND o.finished_at = agg.last_finished
+                (SELECT user_name FROM period_results p
+                  WHERE p.chat_id = ?
+                    AND p.user_id = agg.user_id
+                    AND p.period_end_utc = agg.last_period
                   LIMIT 1) AS user_name,
-                agg.golds, agg.silvers, agg.bronzes, agg.points, agg.games
+                agg.golds, agg.silvers, agg.bronzes, agg.points, agg.periods
             FROM agg
             ORDER BY agg.points DESC, agg.golds DESC, agg.silvers DESC,
                      agg.bronzes DESC, user_name ASC
@@ -467,7 +514,7 @@ def global_top_for_chat(chat_id: int, *, limit: int) -> list[GlobalLeaderRow]:
             silvers=int(r["silvers"]),
             bronzes=int(r["bronzes"]),
             points=int(r["points"]),
-            games=int(r["games"]),
+            periods=int(r["periods"]),
         )
         for r in rows
     ]

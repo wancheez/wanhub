@@ -287,6 +287,25 @@ async def render_summary_podium(
         return None
 
 
+def _record_period_placements(chat_id: int, start_utc: datetime, end_utc: datetime) -> None:
+    """Сохранить призёров закрытого периода в общий рейтинг (/dealglobal).
+
+    Топ берём тот же, что в тексте/пьедестале саммари (по среднему, мин.
+    MIN_GAMES_FOR_AVG). Если призёров нет (ни у кого нет 3+ игр) — список
+    пустой и запись no-op'ит. Ключ периода — момент закрытия `end_utc`,
+    поэтому повторная публикация (catch-up) не задваивает места.
+    """
+    top = deal_db.top_for_chat_avg(
+        chat_id,
+        iso_utc(start_utc),
+        iso_utc(end_utc),
+        min_games=MIN_GAMES_FOR_AVG,
+        limit=TOP_LIMIT,
+    )
+    placements = [(r.user_id, r.user_name, i + 1) for i, r in enumerate(top)]
+    deal_db.record_period_results(chat_id, iso_utc(end_utc), placements)
+
+
 async def _send_summary(bot: Bot, chat_id: int, text: str, image: bytes | None) -> None:
     """Отправить саммари: картинкой с подписью, либо текстом, если картинки нет.
 
@@ -333,6 +352,9 @@ async def post_weekly(bot: Bot, end_utc: datetime) -> int:
         if text is None:
             # У этого чата был ad-hoc, и после него никто не сыграл — нечего показать.
             continue
+        # Фиксируем призёров периода в общий рейтинг — независимо от доставки
+        # сообщения (период состоялся). Идемпотентно по границе end_utc.
+        _record_period_placements(chat_id, start_utc, end_utc)
         image = await render_summary_podium(bot, chat_id, start_utc, end_utc, kind="weekly")
         try:
             await _send_summary(bot, chat_id, text, image)
@@ -373,6 +395,7 @@ async def post_adhoc(bot: Bot, chat_id: int, end_utc: datetime) -> int:
             end_iso,
         )
         return 0
+    _record_period_placements(chat_id, start_utc, end_utc)
     image = await render_summary_podium(bot, chat_id, start_utc, end_utc, kind="adhoc")
     try:
         await _send_summary(bot, chat_id, text, image)
