@@ -5,11 +5,16 @@ from app.bot.skills.anekdot import AnekdotSkill
 from app.bot.skills.base import Skill
 from app.bot.skills.generate_image import GenerateImageSkill
 from app.bot.skills.send_image import SendImageSkill
+from app.bot.skills.show_dealglobal import ShowDealGlobalSkill
 from app.bot.skills.show_dealtop import ShowDealTopSkill
 from app.bot.skills.start_game import StartGameSkill
 
 SKILLS: list[Skill] = [
     StartGameSkill(),
+    # Глобальный — перед недельным: оба ловят слово «рейтинг сделки», но
+    # глобальный требует ещё слово охвата («общий/глобальный»), и try_skills
+    # возвращает на первом совпадении.
+    ShowDealGlobalSkill(),
     ShowDealTopSkill(),
     AnekdotSkill(),
     GenerateImageSkill(),

@@ -293,3 +293,57 @@ def test_mark_adhoc_reset_is_per_chat(fresh_db: Path) -> None:
     assert deal_db.mark_adhoc_reset(100, "2026-05-15T12:00:00+00:00") is True
     assert deal_db.mark_adhoc_reset(100, "2026-05-15T12:00:00+00:00") is False
     assert deal_db.mark_adhoc_reset(200, "2026-05-15T12:00:00+00:00") is True
+
+
+# ---------------------------------------------------------------------------
+# Общий (накопительный) рейтинг по призовым местам — global_top_for_chat
+# ---------------------------------------------------------------------------
+
+
+def test_global_top_counts_places_and_points(fresh_db: Path) -> None:
+    # Анна: 1-е + 2-е = 3+2 = 5 очков
+    deal_db.record_outcome(42, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    deal_db.record_outcome(42, 1, "Анна", 50, dealt=True, case_count=22, round_idx=0, place=2)
+    # Борис: 1-е + 3-е = 3+1 = 4 очка
+    deal_db.record_outcome(42, 2, "Борис", 200, dealt=True, case_count=22, round_idx=0, place=1)
+    deal_db.record_outcome(42, 2, "Борис", 10, dealt=True, case_count=22, round_idx=0, place=3)
+
+    rows = deal_db.global_top_for_chat(42, limit=10)
+    assert [r.user_name for r in rows] == ["Анна", "Борис"]
+    anna = rows[0]
+    assert (anna.golds, anna.silvers, anna.bronzes) == (1, 1, 0)
+    assert anna.points == 5
+    assert anna.games == 2
+    boris = rows[1]
+    assert (boris.golds, boris.silvers, boris.bronzes) == (1, 0, 1)
+    assert boris.points == 4
+
+
+def test_global_top_ignores_null_place(fresh_db: Path) -> None:
+    # Запись без места (старый формат) не должна влиять на рейтинг.
+    deal_db.record_outcome(42, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0)
+    assert deal_db.global_top_for_chat(42, limit=10) == []
+    # А с местом — появляется.
+    deal_db.record_outcome(42, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    rows = deal_db.global_top_for_chat(42, limit=10)
+    assert len(rows) == 1
+    assert rows[0].points == 3
+    assert rows[0].games == 1  # NULL-запись не учтена
+
+
+def test_global_top_orders_by_points_then_medals(fresh_db: Path) -> None:
+    # Оба по 6 очков: у «Голда» — два золота, у «Сильвера» — три серебра.
+    deal_db.record_outcome(42, 1, "Голд", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    deal_db.record_outcome(42, 1, "Голд", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    for _ in range(3):
+        deal_db.record_outcome(42, 2, "Сильвер", 50, dealt=True, case_count=22, round_idx=0, place=2)
+    rows = deal_db.global_top_for_chat(42, limit=10)
+    assert rows[0].points == rows[1].points == 6
+    assert rows[0].user_name == "Голд"  # больше золота → выше
+
+
+def test_global_top_isolated_per_chat(fresh_db: Path) -> None:
+    deal_db.record_outcome(1, 1, "Анна", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    deal_db.record_outcome(2, 2, "Борис", 100, dealt=True, case_count=22, round_idx=0, place=1)
+    assert [r.user_name for r in deal_db.global_top_for_chat(1, limit=10)] == ["Анна"]
+    assert [r.user_name for r in deal_db.global_top_for_chat(2, limit=10)] == ["Борис"]

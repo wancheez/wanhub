@@ -27,8 +27,10 @@ log = logging.getLogger("app")
 __all__ = [
     "BestGameRow",
     "DealStatsDBUnavailable",
+    "GlobalLeaderRow",
     "LeaderRow",
     "chats_with_games_between",
+    "global_top_for_chat",
     "init_db",
     "is_available",
     "last_reset_before",
@@ -63,6 +65,19 @@ class BestGameRow:
     winnings: int
     case_count: int
     round_idx: int | None
+
+
+@dataclass(frozen=True)
+class GlobalLeaderRow:
+    """Строка общего (накопительного, без сброса) рейтинга по призовым местам."""
+
+    user_id: int
+    user_name: str
+    golds: int  # 1-е места
+    silvers: int  # 2-е места
+    bronzes: int  # 3-и места
+    points: int  # 3 за 1-е, 2 за 2-е, 1 за 3-е
+    games: int  # всего партий с известным местом
 
 
 _conn: sqlite3.Connection | None = None
@@ -175,6 +190,9 @@ def _migrate_outcomes(conn: sqlite3.Connection) -> None:
         ("used_swap", "INTEGER"),
         ("swap_kept", "INTEGER"),
         ("offer_history", "TEXT"),
+        # Призовое место в партии (1/2/3...), для общего рейтинга. NULL у старых
+        # записей до бэкафилла (scripts/backfill_deal_places.py).
+        ("place", "INTEGER"),
     ]
     for name, sql_type in additions:
         if name in existing:
@@ -195,6 +213,7 @@ def record_outcome(
     used_swap: bool | None = None,
     swap_kept: bool | None = None,
     offer_history: list[int] | None = None,
+    place: int | None = None,
 ) -> None:
     """Записать исход одной партии для одного игрока. No-op при недоступности.
 
@@ -202,6 +221,9 @@ def record_outcome(
     расширенные колонки (см. `_migrate_outcomes`). Все три nullable: NULL
     означает «фича не применялась» (например, игрок взял Deal до FINAL_SWAP,
     или партия из старого формата без истории оферов).
+
+    `place` — призовое место в партии (1=победа, 2, 3...) для общего рейтинга.
+    NULL означает «место неизвестно» (старый формат до бэкафилла).
     """
     global _unavailable
     if _unavailable:
@@ -213,8 +235,9 @@ def record_outcome(
                 """
                 INSERT INTO outcomes
                   (chat_id, user_id, user_name, winnings, dealt, case_count,
-                   round_idx, finished_at, used_swap, swap_kept, offer_history)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   round_idx, finished_at, used_swap, swap_kept, offer_history,
+                   place)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -228,6 +251,7 @@ def record_outcome(
                     None if used_swap is None else (1 if used_swap else 0),
                     None if swap_kept is None else (1 if swap_kept else 0),
                     json.dumps(offer_history) if offer_history else None,
+                    None if place is None else int(place),
                 ),
             )
         log.info(
@@ -382,6 +406,68 @@ def top_for_chat_avg(
             total=int(r["total"]),
             games=int(r["games"]),
             avg_per_game=int(r["avg_per_game"]),
+        )
+        for r in rows
+    ]
+
+
+def global_top_for_chat(chat_id: int, *, limit: int) -> list[GlobalLeaderRow]:
+    """Общий (накопительный, без сброса) рейтинг чата по призовым местам.
+
+    Учитываются только записи с известным `place` (старые до бэкафилла — NULL —
+    игнорируются). Очки: 3 за 1-е место, 2 за 2-е, 1 за 3-е. Сортировка:
+    points DESC, затем по числу золота/серебра/бронзы, тай-брейк по имени.
+    Имя — из самой свежей записи игрока.
+    """
+    if _unavailable:
+        return []
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            WITH agg AS (
+                SELECT user_id,
+                       SUM(CASE WHEN place = 1 THEN 1 ELSE 0 END) AS golds,
+                       SUM(CASE WHEN place = 2 THEN 1 ELSE 0 END) AS silvers,
+                       SUM(CASE WHEN place = 3 THEN 1 ELSE 0 END) AS bronzes,
+                       SUM(CASE place WHEN 1 THEN 3 WHEN 2 THEN 2 WHEN 3 THEN 1
+                                      ELSE 0 END) AS points,
+                       COUNT(*)         AS games,
+                       MAX(finished_at) AS last_finished
+                FROM outcomes
+                WHERE chat_id = ?
+                  AND place IS NOT NULL
+                GROUP BY user_id
+                HAVING points > 0
+            )
+            SELECT
+                agg.user_id,
+                (SELECT user_name FROM outcomes o
+                  WHERE o.chat_id = ?
+                    AND o.user_id = agg.user_id
+                    AND o.finished_at = agg.last_finished
+                  LIMIT 1) AS user_name,
+                agg.golds, agg.silvers, agg.bronzes, agg.points, agg.games
+            FROM agg
+            ORDER BY agg.points DESC, agg.golds DESC, agg.silvers DESC,
+                     agg.bronzes DESC, user_name ASC
+            LIMIT ?
+            """,
+            (chat_id, chat_id, limit),
+        )
+        rows = cur.fetchall()
+    except (sqlite3.Error, DealStatsDBUnavailable) as e:
+        log.warning("deal_db: global_top_for_chat failed (%s)", e)
+        return []
+    return [
+        GlobalLeaderRow(
+            user_id=int(r["user_id"]),
+            user_name=r["user_name"] or "?",
+            golds=int(r["golds"]),
+            silvers=int(r["silvers"]),
+            bronzes=int(r["bronzes"]),
+            points=int(r["points"]),
+            games=int(r["games"]),
         )
         for r in rows
     ]

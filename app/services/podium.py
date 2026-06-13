@@ -22,13 +22,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger("app")
 
-__all__ = ["PodiumEntry", "render_podium"]
+__all__ = ["GLOBAL_PALETTE", "Palette", "PodiumEntry", "render_podium"]
 
 
 # --- Палитра -----------------------------------------------------------------
 
-_BG_TOP = (28, 32, 56)  # верх вертикального градиента фона (тёмно-синий)
-_BG_BOTTOM = (12, 14, 28)  # низ градиента
 _TITLE = (245, 247, 255)
 _SUBTITLE = (150, 158, 190)
 _FOOTER = (150, 158, 190)
@@ -36,9 +34,38 @@ _NAME = (235, 238, 248)
 _VALUE = (255, 255, 255)
 _SUB = (185, 190, 210)
 
-# Цвета медалей: золото, серебро, бронза. Индексируются местом (0,1,2).
-_MEDAL = ((255, 198, 60), (197, 206, 220), (208, 138, 78))
-_MEDAL_DARK = ((120, 84, 0), (78, 86, 100), (96, 56, 20))  # текст инициалов/места
+
+@dataclass(frozen=True)
+class Palette:
+    """Сменная палитра пьедестала. Меняем фон и цвета медалей под повод.
+
+    bg_top/bg_bottom — концы вертикального градиента фона.
+    medal/medal_dark — кортежи из трёх RGB по местам (0=1-е, 1=2-е, 2=3-е):
+    `medal` — кольцо медальона/крышка тумбы/цифра места, `medal_dark` —
+    основа тумбы и тёмная подложка инициалов.
+    """
+
+    bg_top: tuple[int, int, int]
+    bg_bottom: tuple[int, int, int]
+    medal: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]
+    medal_dark: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]
+
+
+# Недельный/итоговый пьедестал: тёмно-синий фон, классические золото-серебро-бронза.
+_DEFAULT_PALETTE = Palette(
+    bg_top=(28, 32, 56),
+    bg_bottom=(12, 14, 28),
+    medal=((255, 198, 60), (197, 206, 220), (208, 138, 78)),
+    medal_dark=((120, 84, 0), (78, 86, 100), (96, 56, 20)),
+)
+
+# Глобальный рейтинг: фиолетово-индиго фон, тёплые «премиальные» оттенки медалей.
+GLOBAL_PALETTE = Palette(
+    bg_top=(46, 26, 64),
+    bg_bottom=(18, 10, 30),
+    medal=((255, 214, 102), (210, 196, 232), (224, 150, 120)),
+    medal_dark=((110, 70, 10), (96, 84, 120), (104, 60, 40)),
+)
 
 # --- Геометрия ---------------------------------------------------------------
 
@@ -156,7 +183,11 @@ def _load_avatar(data: bytes, diameter: int) -> Image.Image | None:
 
 
 def _draw_medallion(
-    img: Image.Image, center: tuple[int, int], rank: int, entry: PodiumEntry
+    img: Image.Image,
+    center: tuple[int, int],
+    rank: int,
+    entry: PodiumEntry,
+    palette: Palette,
 ) -> None:
     """Кружок-аватар с цветной обводкой по медали места.
 
@@ -168,7 +199,7 @@ def _draw_medallion(
     draw = ImageDraw.Draw(img)
     box = (cx - r, cy - r, cx + r, cy + r)
     # Обводка-кольцо цветом медали.
-    draw.ellipse(box, fill=_MEDAL[rank])
+    draw.ellipse(box, fill=palette.medal[rank])
 
     inner_r = r - 7
     diameter = inner_r * 2
@@ -183,11 +214,17 @@ def _draw_medallion(
     inner = (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r)
     draw.ellipse(inner, fill=(22, 26, 44))
     draw.text(
-        (cx, cy), _initials(entry.name), font=_font(46, bold=True), fill=_MEDAL[rank], anchor="mm"
+        (cx, cy),
+        _initials(entry.name),
+        font=_font(46, bold=True),
+        fill=palette.medal[rank],
+        anchor="mm",
     )
 
 
-def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> None:
+def _draw_bar(
+    img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry, palette: Palette
+) -> None:
     """Одна тумба пьедестала плюс всё, что над и на ней."""
     draw = ImageDraw.Draw(img)
     bar_h = _BAR_HEIGHTS[rank]
@@ -196,7 +233,7 @@ def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> N
     bar_right = slot_x + _BAR_W
 
     # Сама тумба: лёгкий двухтоновый блок со скруглённым верхом.
-    face = tuple(min(255, c + 18) for c in _MEDAL_DARK[rank])
+    face = tuple(min(255, c + 18) for c in palette.medal_dark[rank])
     draw.rounded_rectangle(
         (bar_left, bar_top, bar_right, _H - _MARGIN_BOTTOM),
         radius=14,
@@ -206,7 +243,7 @@ def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> N
     draw.rounded_rectangle(
         (bar_left, bar_top, bar_right, bar_top + 12),
         radius=6,
-        fill=_MEDAL[rank],
+        fill=palette.medal[rank],
     )
 
     cx = (bar_left + bar_right) // 2
@@ -216,7 +253,7 @@ def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> N
         (cx, bar_top + bar_h // 2 + 18),
         str(rank + 1),
         font=_font(96, bold=True),
-        fill=_MEDAL[rank],
+        fill=palette.medal[rank],
         anchor="mm",
     )
 
@@ -237,7 +274,7 @@ def _draw_bar(img: Image.Image, slot_x: int, rank: int, entry: PodiumEntry) -> N
     name = _fit_text(draw, entry.name, _font(28, bold=True), _BAR_W + 4)
     draw.text((cx, name_y), name, font=_font(28, bold=True), fill=_NAME, anchor="mm")
 
-    _draw_medallion(img, (cx, med_cy), rank, entry)
+    _draw_medallion(img, (cx, med_cy), rank, entry, palette)
 
 
 def render_podium(
@@ -246,14 +283,18 @@ def render_podium(
     title: str,
     period: str | None = None,
     footer: str | None = None,
+    palette: Palette | None = None,
 ) -> bytes:
     """Отрисовать пьедестал и вернуть PNG-байты.
 
     entries — топ по убыванию места (1-е, 2-е, 3-е). Хватит и одной записи:
     пустые слоты просто не рисуются. Лишние записи (4+) игнорируются —
     пьедестал всегда максимум на три места.
+
+    palette — сменная палитра (фон + цвета медалей). None → тёмно-синий дефолт.
     """
-    img = _vertical_gradient((_W, _H), _BG_TOP, _BG_BOTTOM)
+    palette = palette or _DEFAULT_PALETTE
+    img = _vertical_gradient((_W, _H), palette.bg_top, palette.bg_bottom)
     draw = ImageDraw.Draw(img)
 
     # Заголовок и период по центру сверху.
@@ -280,7 +321,7 @@ def render_podium(
         if rank >= len(entries):
             continue
         slot_x = start_x + slot * (_BAR_W + _BAR_GAP)
-        _draw_bar(img, slot_x, rank, entries[rank])
+        _draw_bar(img, slot_x, rank, entries[rank], palette)
 
     if footer:
         draw.text(

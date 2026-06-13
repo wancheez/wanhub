@@ -1,6 +1,7 @@
 from app.bot.skills.anekdot import extract_anekdot_intent
 from app.bot.skills.generate_image import GenerateImageSkill, extract_generate_intent
 from app.bot.skills.send_image import SendImageSkill
+from app.bot.skills.show_dealglobal import ShowDealGlobalSkill, extract_dealglobal_intent
 from app.bot.skills.show_dealtop import ShowDealTopSkill, extract_dealtop_intent
 from app.bot.skills.start_game import StartGameSkill, extract_game_intent
 
@@ -595,6 +596,59 @@ def test_dealtop_no_match_general_question():
 def test_dealtop_skill_match():
     s = ShowDealTopSkill()
     assert s.match("покажи рейтинг сделки") == {}
+
+
+def test_dealtop_no_match_global_scope():
+    # «Общий/глобальный» теперь уходит в общий рейтинг, не в недельный.
+    assert extract_dealtop_intent("общий рейтинг сделки") is None
+    assert extract_dealtop_intent("глобальный топ сделки") is None
+
+
+def test_dealtop_still_matches_weekly_scope():
+    assert extract_dealtop_intent("текущий рейтинг сделки") == {}
+    assert extract_dealtop_intent("недельный рейтинг сделки") == {}
+
+
+# ----- ShowDealGlobalSkill -----
+
+
+def test_dealglobal_match_obshiy():
+    assert extract_dealglobal_intent("общий рейтинг сделки") == {}
+
+
+def test_dealglobal_match_globalny():
+    assert extract_dealglobal_intent("глобальный рейтинг сделки") == {}
+
+
+def test_dealglobal_match_with_verb():
+    assert extract_dealglobal_intent("покажи общий топ сделок") == {}
+
+
+def test_dealglobal_match_vechny():
+    assert extract_dealglobal_intent("вечный лидерборд сделки") == {}
+
+
+def test_dealglobal_match_za_vse_vremya():
+    assert extract_dealglobal_intent("рейтинг сделки за всё время") == {}
+    assert extract_dealglobal_intent("рейтинг сделки за все время") == {}
+
+
+def test_dealglobal_match_punct():
+    assert extract_dealglobal_intent("покажи общий рейтинг сделки!") == {}
+
+
+def test_dealglobal_no_match_bare_rating():
+    # Без слова охвата — это недельный рейтинг, не общий.
+    assert extract_dealglobal_intent("рейтинг сделки") is None
+
+
+def test_dealglobal_no_match_other_game():
+    assert extract_dealglobal_intent("общий рейтинг квиза") is None
+
+
+def test_dealglobal_skill_match():
+    s = ShowDealGlobalSkill()
+    assert s.match("общий рейтинг сделки") == {}
 
 
 # ----- GenerateImageSkill -----

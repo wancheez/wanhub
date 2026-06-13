@@ -10,7 +10,8 @@
   /deal       — открыть лобби и начать партию
   /dealcancel — отменить текущую партию (только стартер)
   /dealrules  — показать правила игры
-  /dealtop    — лидерборд этого чата
+  /dealtop    — недельный лидерборд этого чата
+  /dealglobal — общий (накопительный) рейтинг чата по призовым местам
 """
 
 import asyncio
@@ -45,7 +46,7 @@ from app.services import (
     games,
 )
 from app.services.avatars import fetch_avatars
-from app.services.podium import PodiumEntry, render_podium
+from app.services.podium import GLOBAL_PALETTE, PodiumEntry, render_podium
 
 router = Router(name="deal")
 log = logging.getLogger("app")
@@ -1385,6 +1386,86 @@ def _render_dealtop_podium(
         return None
 
 
+@router.message(Command("dealglobal"))
+async def cmd_dealglobal(message: Message) -> None:
+    """Общий (накопительный, без сброса) рейтинг чата по призовым местам.
+
+    В отличие от /dealtop (недельное окно, средний выигрыш) — копится за всё
+    время и считает 1/2/3 места и очки (3/2/1).
+    """
+    if not deal_db.is_available():
+        await message.answer(
+            "⚠️ База статистики недоступна (ошибка SQLite или нет прав на запись).\n"
+            "Рейтинг не работает до рестарта бота."
+        )
+        return
+    rows = deal_db.global_top_for_chat(message.chat.id, limit=20)
+    if not rows:
+        await message.answer(
+            "<b>🏆 Глобальный рейтинг «Сделка»</b>\n"
+            "<i>за всё время</i>\n"
+            "Пока никто не занимал призовых мест. Запусти /deal — и поехали!",
+            parse_mode="HTML",
+        )
+        return
+    lines = [
+        "<b>🏆 Глобальный рейтинг «Сделка»</b>",
+        "<i>за всё время</i>",
+    ]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, r in enumerate(rows):
+        prefix = medals[i] if i < len(medals) else f"{i + 1}."
+        lines.append(
+            f"{prefix} <b>{escape(r.user_name)}</b> · "
+            f"<b>{r.points}</b> очк. · "
+            f"🥇{r.golds} 🥈{r.silvers} 🥉{r.bronzes} · "
+            f"{r.games} партий"
+        )
+    text = "\n".join(lines)
+    avatars = (
+        await fetch_avatars(message.bot, [r.user_id for r in rows[:3]])
+        if message.bot is not None
+        else {}
+    )
+    image = _render_dealglobal_podium(rows, avatars)
+    if image is None:
+        await message.answer(text, parse_mode="HTML")
+        return
+    photo = BufferedInputFile(image, filename="dealglobal.png")
+    if len(text) <= 1000:
+        await message.answer_photo(photo, caption=text, parse_mode="HTML")
+    else:
+        await message.answer_photo(photo)
+        await message.answer(text, parse_mode="HTML")
+
+
+def _render_dealglobal_podium(
+    rows: list[deal_db.GlobalLeaderRow], avatars: dict[int, bytes | None]
+) -> bytes | None:
+    """Пьедестал общего рейтинга (топ-3 по очкам). None при сбое рендера."""
+    entries = [
+        # На картинке без эмодзи-медалей (DejaVu Sans их не рисует) —
+        # компактный формат «золото-серебро-бронза».
+        PodiumEntry(
+            name=r.user_name,
+            value=f"{r.points} очк.",
+            sub=f"{r.golds}-{r.silvers}-{r.bronzes}",
+            avatar=avatars.get(r.user_id),
+        )
+        for r in rows[:3]
+    ]
+    try:
+        return render_podium(
+            entries,
+            title="Глобальный рейтинг «Сделка»",
+            period="за всё время",
+            palette=GLOBAL_PALETTE,
+        )
+    except Exception:
+        log.exception("dealglobal: podium render failed")
+        return None
+
+
 @router.message(Command("dealsummary"))
 async def cmd_dealsummary(message: Message) -> None:
     """Админская команда внеочередного подведения итогов В ЭТОМ ЧАТЕ.
@@ -1941,10 +2022,11 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
         image = _render_game_podium(session, avatars)
         await _send_game_result(message, session, image)
 
-        for p in session.players.values():
-            if p.status not in ("dealt", "won_final"):
-                # Игрок присоединился, но не сыграл (например, отмена) — пропускаем.
-                continue
+        # Места считаем по тому же ранжированию, что и пьедестал партии
+        # (_ranked_players: убывание выигрыша, тай-брейк по имени). Игроки, не
+        # сыгравшие (отмена и т.п.), в рейтинг не попадают и место не получают.
+        ranked = [p for p in _ranked_players(session) if p.status in ("dealt", "won_final")]
+        for idx, p in enumerate(ranked):
             deal_db.record_outcome(
                 chat_id=session.chat_id,
                 user_id=p.user_id,
@@ -1956,6 +2038,7 @@ async def _finalize_and_summarize(message: Message, session: deal.DealSession) -
                 used_swap=(p.swap_kept is not None),
                 swap_kept=p.swap_kept,
                 offer_history=list(session.offer_history) if session.offer_history else None,
+                place=idx + 1,
             )
     finally:
         deal.cancel_session(session.chat_id)
