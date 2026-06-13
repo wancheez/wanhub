@@ -336,7 +336,9 @@ def test_global_top_orders_by_points_then_medals(fresh_db: Path) -> None:
     deal_db.record_outcome(42, 1, "Голд", 100, dealt=True, case_count=22, round_idx=0, place=1)
     deal_db.record_outcome(42, 1, "Голд", 100, dealt=True, case_count=22, round_idx=0, place=1)
     for _ in range(3):
-        deal_db.record_outcome(42, 2, "Сильвер", 50, dealt=True, case_count=22, round_idx=0, place=2)
+        deal_db.record_outcome(
+            42, 2, "Сильвер", 50, dealt=True, case_count=22, round_idx=0, place=2
+        )
     rows = deal_db.global_top_for_chat(42, limit=10)
     assert rows[0].points == rows[1].points == 6
     assert rows[0].user_name == "Голд"  # больше золота → выше

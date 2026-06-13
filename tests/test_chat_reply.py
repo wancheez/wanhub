@@ -15,17 +15,13 @@ def _bot():
     return User(id=BOT_ID, is_bot=True, first_name="WanBot")
 
 
-def _make_message(
-    *, reply_from: User | None, quote: TextQuote | None = None
-) -> Message:
+def _make_message(*, reply_from: User | None, quote: TextQuote | None = None) -> Message:
     """Минимальное входящее сообщение-ответ. `reply_from` — автор сообщения,
     на которое отвечают; `quote` — выделенный фрагмент (ручная цитата)."""
     chat = Chat(id=-100, type="supergroup")
     replied = None
     if reply_from is not None:
-        replied = Message(
-            message_id=1, date=0, chat=chat, from_user=reply_from, text="бот сказал"
-        )
+        replied = Message(message_id=1, date=0, chat=chat, from_user=reply_from, text="бот сказал")
     msg = Message(
         message_id=2,
         date=0,
