@@ -32,9 +32,18 @@ log = logging.getLogger("app")
 
 DATA_PATH = Path(__file__).with_name("geo_cells.json")
 
-# Сколько изображений запрашивать у Mapillary в пределах bbox ячейки — берём с
-# запасом, потом выбираем случайное с валидным thumb_url.
-_IMAGES_LIMIT = 50
+# Mapillary Graph API отклоняет запрос /images по слишком большому bbox ошибкой
+# «Please reduce the amount of data...» (city-bbox = десятки тысяч фото). Поэтому
+# на каждый раунд берём маленькое СЛУЧАЙНОЕ окно ~_WINDOW_DEG° внутри bbox
+# ячейки. ~0.003° ≈ 300 м — плотные центры отдают сотни фото, но не упираются в
+# лимит. Если конкретное окно всё же «слишком плотное» или пустое — пробуем
+# другое (до _WINDOW_ATTEMPTS раз).
+_WINDOW_DEG = 0.003
+_WINDOW_ATTEMPTS = 6
+# Сколько id тянуть из окна (берём только id — это лёгкий запрос; thumb для
+# выбранного фото запрашиваем отдельным вызовом, иначе Mapillary тоже ругается
+# на «слишком много данных»).
+_IDS_LIMIT = 50
 # Размер превью Mapillary. thumb_1024_url — баланс «качество vs трафик».
 _THUMB_FIELD = "thumb_1024_url"
 
@@ -117,44 +126,86 @@ def reset_cache() -> None:
 
 
 def _client_kwargs() -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"timeout": GEO_TIMEOUT_S, "follow_redirects": True}
+    # connect — короткий (GEO_TIMEOUT_S), read — щедрее: скачивание превью (до
+    # ~200 КБ) на медленном линке упирается в read-таймаут чаще, чем connect.
+    timeout = httpx.Timeout(connect=GEO_TIMEOUT_S, read=20.0, write=10.0, pool=GEO_TIMEOUT_S)
+    kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
     if GEO_MAPILLARY_PROXY:
         kwargs["proxy"] = GEO_MAPILLARY_PROXY
     return kwargs
 
 
+def _random_window(cell: GeoCell) -> str:
+    """Случайное окно ~_WINDOW_DEG° внутри bbox ячейки → строка bbox для Mapillary.
+
+    Если ячейка уже меньше окна по какой-то оси — используем её размер целиком.
+    """
+    mnlon, mnlat, mxlon, mxlat = cell.bbox
+    wlon = min(_WINDOW_DEG, mxlon - mnlon)
+    wlat = min(_WINDOW_DEG, mxlat - mnlat)
+    lon0 = random.uniform(mnlon, mxlon - wlon)
+    lat0 = random.uniform(mnlat, mxlat - wlat)
+    return f"{lon0:.5f},{lat0:.5f},{lon0 + wlon:.5f},{lat0 + wlat:.5f}"
+
+
 async def _fetch_cell_image(client: httpx.AsyncClient, cell: GeoCell) -> bytes | None:
-    """Случайное фото внутри bbox ячейки → JPEG-байты. None на любой ошибке/пусто."""
-    bbox = ",".join(str(v) for v in cell.bbox)
-    params = {
-        "access_token": GEO_MAPILLARY_TOKEN,
-        "fields": f"id,{_THUMB_FIELD}",
-        "bbox": bbox,
-        "limit": str(_IMAGES_LIMIT),
-    }
-    try:
-        resp = await client.get(f"{GEO_MAPILLARY_API_URL}/images", params=params)
-        resp.raise_for_status()
-        data = resp.json()
-    except (httpx.HTTPError, json.JSONDecodeError) as e:
-        log.info("geo: images query failed for %s — %s", cell.name_ru, type(e).__name__)
-        return None
+    """Случайное фото из ячейки → JPEG-байты. None, если за _WINDOW_ATTEMPTS окон
+    не нашлось пригодного кадра (или сеть/токен не дают ответа).
 
-    candidates = [
-        img.get(_THUMB_FIELD) for img in (data.get("data") or []) if img.get(_THUMB_FIELD)
-    ]
-    if not candidates:
-        log.info("geo: no images in bbox for %s (%s)", cell.name_ru, cell.cca2)
-        return None
+    Поток на каждое окно: (1) лёгкий запрос id по маленькому bbox; (2) для
+    случайного id — отдельный запрос его thumb_1024_url; (3) скачивание превью
+    (по подписанному CDN-URL, без наших параметров). «reduce data»/пустое окно/
+    сетевой сбой → пробуем следующее окно.
+    """
+    for _ in range(_WINDOW_ATTEMPTS):
+        bbox = _random_window(cell)
+        try:
+            resp = await client.get(
+                f"{GEO_MAPILLARY_API_URL}/images",
+                params={"access_token": GEO_MAPILLARY_TOKEN, "fields": "id", "bbox": bbox,
+                        "limit": str(_IDS_LIMIT)},
+            )
+        except httpx.HTTPError as e:
+            log.info("geo: ids query failed for %s — %s", cell.name_ru, type(e).__name__)
+            continue
+        if resp.status_code != 200:
+            # 500 «reduce data» — окно слишком плотное, берём другое; прочие
+            # коды (401/403/429) тоже не фатальны для одной ячейки.
+            log.info("geo: ids query HTTP %d for %s — %s", resp.status_code, cell.name_ru,
+                     resp.text[:120])
+            continue
+        try:
+            ids = [img["id"] for img in (resp.json().get("data") or []) if img.get("id")]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        if not ids:
+            continue
 
-    thumb_url = random.choice(candidates)
-    try:
-        r = await client.get(thumb_url)
-        r.raise_for_status()
-    except httpx.HTTPError as e:
-        log.info("geo: thumb download failed for %s — %s", cell.name_ru, type(e).__name__)
-        return None
-    return r.content
+        image_id = random.choice(ids)
+        try:
+            meta = await client.get(
+                f"{GEO_MAPILLARY_API_URL}/{image_id}",
+                params={"access_token": GEO_MAPILLARY_TOKEN, "fields": _THUMB_FIELD},
+            )
+            if meta.status_code != 200:
+                continue
+            thumb_url = meta.json().get(_THUMB_FIELD)
+        except (httpx.HTTPError, json.JSONDecodeError):
+            continue
+        if not thumb_url:
+            continue
+
+        try:
+            img = await client.get(thumb_url)  # подписанный CDN-URL — без access_token
+            if img.status_code == 200 and img.content:
+                return img.content
+        except httpx.HTTPError as e:
+            log.info("geo: thumb download failed for %s — %s", cell.name_ru, type(e).__name__)
+            continue
+
+    log.info("geo: no usable image for %s (%s) after %d windows", cell.name_ru, cell.cca2,
+             _WINDOW_ATTEMPTS)
+    return None
 
 
 async def build_locations(num: int) -> list[GeoLocation]:
