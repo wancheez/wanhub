@@ -13,6 +13,9 @@ from pathlib import Path
 log = logging.getLogger("app")
 
 DATA_PATH = Path(__file__).with_name("countries.json")
+# Центроиды стран (cca2 → [lat, lng]) — вручную поддерживаемая таблица, нужна
+# игре /geo для подсказок «теплее/холоднее». См. country_centroids.json.
+CENTROIDS_PATH = Path(__file__).with_name("country_centroids.json")
 FLAG_CDN_TEMPLATE = "https://flagcdn.com/w320/{cc}.png"
 
 
@@ -24,6 +27,9 @@ class Country:
     flag_url: str
     region: str
     capital_ru: str | None = None
+    # Центроид страны (градусы). None, если нет в country_centroids.json.
+    lat: float | None = None
+    lng: float | None = None
 
 
 _cache: list[Country] | None = None
@@ -42,6 +48,23 @@ async def get_countries() -> list[Country]:
     return _cache
 
 
+def _load_centroids() -> dict[str, tuple[float, float]]:
+    """Прочитать country_centroids.json. Отсутствие/битость — не фатально:
+    вернём пустой словарь, у стран просто не будет координат (подсказки
+    «теплее/холоднее» в /geo тогда не сработают, остальное живёт)."""
+    try:
+        raw = CENTROIDS_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("countries: no centroids (%s) — %s", CENTROIDS_PATH.name, type(e).__name__)
+        return {}
+    out: dict[str, tuple[float, float]] = {}
+    for cc, pair in data.items():
+        if isinstance(pair, list) and len(pair) == 2:
+            out[cc.strip().upper()] = (float(pair[0]), float(pair[1]))
+    return out
+
+
 def _load() -> list[Country]:
     try:
         raw = DATA_PATH.read_text(encoding="utf-8")
@@ -54,11 +77,13 @@ def _load() -> list[Country]:
         log.warning("countries: malformed json — %s", e)
         raise RuntimeError("countries unavailable") from e
 
+    centroids = _load_centroids()
     out: list[Country] = []
     for item in items:
         cca2 = (item.get("cca2") or "").strip().upper()
         if not cca2:
             continue
+        lat_lng = centroids.get(cca2)
         out.append(
             Country(
                 cca2=cca2,
@@ -67,6 +92,8 @@ def _load() -> list[Country]:
                 flag_url=FLAG_CDN_TEMPLATE.format(cc=cca2.lower()),
                 region=item.get("region") or "",
                 capital_ru=item.get("capital_ru"),
+                lat=lat_lng[0] if lat_lng else None,
+                lng=lat_lng[1] if lat_lng else None,
             )
         )
     if not out:

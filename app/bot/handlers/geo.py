@@ -1,9 +1,11 @@
 """Команда /geo: «Geo Guesser» — угадай страну по уличному фото из Mapillary.
 
 Визард «сколько раундов» → партия. Каждый раунд бот шлёт фото локации; игроки
-отвечают свободным текстом **реплаем** на это фото. Гонка: первый правильный
-ответ закрывает раунд и получает очко (неверные не штрафуются). Рейтинг не
-персистентный — в конце показываем табло счёта, как в /riddles.
+пишут страны **простым текстом в чат** (без реплая). На каждую догадку бот
+отвечает реплаем «теплее/холоднее» относительно предыдущей догадки раунда (по
+расстоянию центроидов стран). Назвавший загаданную страну первым забирает раунд
+(+1 очко); неверные догадки раунд не закрывают. Рейтинг не персистентный — в
+конце показываем табло счёта, как в /riddles.
 """
 
 import asyncio
@@ -124,7 +126,7 @@ def _check_owner(cb: CallbackQuery, owner_id: int) -> bool:
 def _round_caption(game: games.Game) -> str:
     return (
         f"<b>🌍 Раунд {game.current_idx + 1}/{game.total}</b>\n"
-        "Что это за страна? Ответь <b>реплаем</b> на это фото."
+        "Что это за страна? Пишите страны <b>в чат</b> — подскажу теплее/холоднее."
     )
 
 
@@ -395,39 +397,42 @@ async def on_stop(cb: CallbackQuery) -> None:
     await cb.answer()
 
 
-# ----------------------------- reply answer handler -----------------------------
+# ----------------------------- guess handler (plain text) -----------------------------
 
 
-def _is_active_geo_reply(message: Message) -> bool:
-    """Фильтр: сообщение — reply на текущую локацию идущей гео-игры в этом чате.
+def _is_geo_guess(message: Message) -> bool:
+    """Фильтр: в чате идёт гео-раунд И текст распознаётся как страна.
 
-    Отсев держим в фильтре, а не в теле хендлера: иначе aiogram счёл бы апдейт
-    обработанным, и следующий роутер (chat.py) не увидел бы сообщение — сломалась
-    бы фича «Чат, это правда?» с reply на цитату (см. riddles._is_active_riddle_reply).
+    Только тогда перехватываем сообщение как догадку. Если текст не похож на
+    страну (обычная болтовня, «Чат, …»), фильтр возвращает False — и сообщение
+    уходит дальше, к chat.py. Отсев держим в фильтре, а не в теле: матч в теле
+    пометил бы апдейт обработанным и сломал бы catch-all chat.py
+    (см. riddles._is_active_riddle_reply).
     """
-    if message.reply_to_message is None or not message.text:
+    if not message.text:
         return False
     game = games.get_game(message.chat.id)
-    if game is None or game.kind is not games.GameKind.GEO:
+    if game is None or game.kind is not games.GameKind.GEO or game.is_finished:
         return False
-    return message.reply_to_message.message_id == game.active_message_id
+    return games.resolve_country(message.text) is not None
 
 
-@router.message(F.text & F.reply_to_message, _is_active_geo_reply)
-async def on_reply_answer(message: Message) -> None:
-    """Свободно-текстовый ответ игрока на текущую локацию."""
+@router.message(F.text, _is_geo_guess)
+async def on_guess(message: Message) -> None:
+    """Догадка игрока (страна простым текстом): верно / теплее / холоднее."""
     if message.from_user is None or message.text is None:
         return
     chat_id = message.chat.id
     game = games.get_game(chat_id)
-    assert game is not None  # гарантировано фильтром _is_active_geo_reply
+    assert game is not None  # гарантировано фильтром _is_geo_guess
 
     user = message.from_user
     user_name = user.full_name or user.username or str(user.id)
     q_idx = game.current_idx
     outcome = games.submit_geo_answer(chat_id, user.id, user_name, q_idx, message.text)
+    R = games.GeoSubmitResult
 
-    if outcome.result is games.RiddleSubmitResult.CORRECT:
+    if outcome.result is R.CORRECT:
         await message.reply(
             f"✅ Верно! Это <b>{escape(outcome.canonical_answer or '')}</b>.",
             parse_mode="HTML",
@@ -435,7 +440,19 @@ async def on_reply_answer(message: Message) -> None:
         await _finalize_geo(message, game, q_idx, solver_name=user_name)
         await _advance_or_finish(message, chat_id, q_idx)
         return
-    # WRONG_HAS_ATTEMPTS / ALREADY_SOLVED / STALE_ROUND / прочее — молча.
+
+    guess = escape(outcome.guess_name or "")
+    if outcome.result is R.FIRST:
+        await message.reply(f"📍 {guess} — засёк. Дальше скажу теплее или холоднее.")
+    elif outcome.result is R.WARMER:
+        await message.reply(f"🔥 Теплее! ({guess})")
+    elif outcome.result is R.COLDER:
+        await message.reply(f"🧊 Холоднее ({guess})")
+    elif outcome.result is R.SAME:
+        await message.reply(f"🤏 Примерно так же ({guess})")
+    elif outcome.result is R.NO_COORDS:
+        await message.reply(f"🤷 {guess}? Не знаю, где это.")
+    # ALREADY_SOLVED / STALE_ROUND / NOT_A_COUNTRY / прочее — молча.
 
 
 # ----------------------------- internals -----------------------------
