@@ -282,7 +282,9 @@ async def on_pick_num(cb: CallbackQuery) -> None:
         await _send_geo(cb.message, game)
 
 
-async def _run_geo_start(chat_id: int, num: int, owner_id: int) -> tuple[games.Game | None, str | None]:
+async def _run_geo_start(
+    chat_id: int, num: int, owner_id: int
+) -> tuple[games.Game | None, str | None]:
     """Запустить гео-партию. Вернуть (game, None) либо (None, текст ошибки)."""
     try:
         await games.start_geo_game(chat_id, num, owner_id)

@@ -686,7 +686,9 @@ def submit_geo_answer(
     if guess.cca2 == target_cca2:
         game.answers[q_idx][user_id] = game.questions[q_idx].correct_idx
         game.players[user_id] = user_name
-        return GeoOutcome(GeoSubmitResult.CORRECT, guess_name=guess.name_ru, canonical_answer=canonical)
+        return GeoOutcome(
+            GeoSubmitResult.CORRECT, guess_name=guess.name_ru, canonical_answer=canonical
+        )
 
     target = _geo_cca2_index.get(target_cca2)
     if target is None or target.lat is None or guess.lat is None:
@@ -704,17 +706,27 @@ def submit_geo_answer(
 
     if best is None:
         _set_best()
-        return GeoOutcome(GeoSubmitResult.FIRST, guess_name=guess.name_ru, distance_km=dist,
-                          best_name=guess.name_ru)
+        return GeoOutcome(
+            GeoSubmitResult.FIRST,
+            guess_name=guess.name_ru,
+            distance_km=dist,
+            best_name=guess.name_ru,
+        )
     if dist < best - _GEO_SAME_EPS_KM:
         _set_best()
-        return GeoOutcome(GeoSubmitResult.WARMER, guess_name=guess.name_ru, distance_km=dist,
-                          best_name=guess.name_ru)
+        return GeoOutcome(
+            GeoSubmitResult.WARMER,
+            guess_name=guess.name_ru,
+            distance_km=dist,
+            best_name=guess.name_ru,
+        )
     if dist > best + _GEO_SAME_EPS_KM:
-        return GeoOutcome(GeoSubmitResult.COLDER, guess_name=guess.name_ru, distance_km=dist,
-                          best_name=best_name)
-    return GeoOutcome(GeoSubmitResult.SAME, guess_name=guess.name_ru, distance_km=dist,
-                      best_name=best_name)
+        return GeoOutcome(
+            GeoSubmitResult.COLDER, guess_name=guess.name_ru, distance_km=dist, best_name=best_name
+        )
+    return GeoOutcome(
+        GeoSubmitResult.SAME, guess_name=guess.name_ru, distance_km=dist, best_name=best_name
+    )
 
 
 def force_finish_geo(chat_id: int, q_idx: int) -> str | None:

@@ -32,14 +32,18 @@ log = logging.getLogger("app")
 
 DATA_PATH = Path(__file__).with_name("geo_cells.json")
 
-# Mapillary Graph API отклоняет запрос /images по слишком большому bbox ошибкой
-# «Please reduce the amount of data...» (city-bbox = десятки тысяч фото). Поэтому
-# на каждый раунд берём маленькое СЛУЧАЙНОЕ окно ~_WINDOW_DEG° внутри bbox
-# ячейки. ~0.003° ≈ 300 м — плотные центры отдают сотни фото, но не упираются в
-# лимит. Если конкретное окно всё же «слишком плотное» или пустое — пробуем
-# другое (до _WINDOW_ATTEMPTS раз).
-_WINDOW_DEG = 0.003
-_WINDOW_ATTEMPTS = 6
+# Mapillary Graph API формально (с 16.01.2026) требует, чтобы bbox в /images был
+# СТРОГО МЕНЬШЕ 0.01° по стороне — иначе 500 «Please reduce the amount of data».
+# Сверх того, очень плотное окно (тысячи фото) может упереться в лимит объёма
+# ответа, а у самого Graph API бывают транзиентные 5xx. Поэтому берём маленькое
+# случайное окно внутри ячейки и АДАПТИВНО подбираем размер: на «reduce data»
+# ужимаем, на пустой ответ — расширяем; транзиентные сбои просто ретраим другим
+# окном. Для крупных площадей Mapillary рекомендует vector tiles, но это тянет
+# protobuf-зависимость — здесь обходимся адаптивным окном.
+_WINDOW_START_DEG = 0.004  # ~400 м — старт
+_WINDOW_MIN_DEG = 0.0008  # ~80 м — нижняя граница ужатия (гиперплотные центры)
+_WINDOW_MAX_DEG = 0.009  # держим СТРОГО < 0.01° (жёсткий лимит Mapillary)
+_WINDOW_ATTEMPTS = 8
 # Сколько id тянуть из окна (берём только id — это лёгкий запрос; thumb для
 # выбранного фото запрашиваем отдельным вызовом, иначе Mapillary тоже ругается
 # на «слишком много данных»).
@@ -135,17 +139,24 @@ def _client_kwargs() -> dict[str, Any]:
     return kwargs
 
 
-def _random_window(cell: GeoCell) -> str:
-    """Случайное окно ~_WINDOW_DEG° внутри bbox ячейки → строка bbox для Mapillary.
+def _random_window(cell: GeoCell, size: float) -> str:
+    """Случайное окно `size`° внутри bbox ячейки → строка bbox для Mapillary.
 
     Если ячейка уже меньше окна по какой-то оси — используем её размер целиком.
     """
     mnlon, mnlat, mxlon, mxlat = cell.bbox
-    wlon = min(_WINDOW_DEG, mxlon - mnlon)
-    wlat = min(_WINDOW_DEG, mxlat - mnlat)
+    wlon = min(size, mxlon - mnlon)
+    wlat = min(size, mxlat - mnlat)
     lon0 = random.uniform(mnlon, mxlon - wlon)
     lat0 = random.uniform(mnlat, mxlat - wlat)
     return f"{lon0:.5f},{lat0:.5f},{lon0 + wlon:.5f},{lat0 + wlat:.5f}"
+
+
+def _is_reduce_data(resp: httpx.Response) -> bool:
+    """500 с просьбой Mapillary «reduce the amount of data» (окно слишком плотное)."""
+    if resp.status_code not in (400, 500):
+        return False
+    return "reduce the amount of data" in resp.text.lower()
 
 
 async def _fetch_cell_image(client: httpx.AsyncClient, cell: GeoCell) -> bytes | None:
@@ -154,31 +165,45 @@ async def _fetch_cell_image(client: httpx.AsyncClient, cell: GeoCell) -> bytes |
 
     Поток на каждое окно: (1) лёгкий запрос id по маленькому bbox; (2) для
     случайного id — отдельный запрос его thumb_1024_url; (3) скачивание превью
-    (по подписанному CDN-URL, без наших параметров). «reduce data»/пустое окно/
-    сетевой сбой → пробуем следующее окно.
+    (по подписанному CDN-URL, без наших параметров).
+
+    Размер окна адаптивный: «reduce data» → ужимаем (×0.5), пустой ответ →
+    расширяем (×1.7, но строго < 0.01°), транзиентный сбой/5xx → просто другое
+    окно того же размера.
     """
+    size = _WINDOW_START_DEG
     for _ in range(_WINDOW_ATTEMPTS):
-        bbox = _random_window(cell)
+        bbox = _random_window(cell, size)
         try:
             resp = await client.get(
                 f"{GEO_MAPILLARY_API_URL}/images",
-                params={"access_token": GEO_MAPILLARY_TOKEN, "fields": "id", "bbox": bbox,
-                        "limit": str(_IDS_LIMIT)},
+                params={
+                    "access_token": GEO_MAPILLARY_TOKEN,
+                    "fields": "id",
+                    "bbox": bbox,
+                    "limit": str(_IDS_LIMIT),
+                },
             )
         except httpx.HTTPError as e:
             log.info("geo: ids query failed for %s — %s", cell.name_ru, type(e).__name__)
             continue
         if resp.status_code != 200:
-            # 500 «reduce data» — окно слишком плотное, берём другое; прочие
-            # коды (401/403/429) тоже не фатальны для одной ячейки.
-            log.info("geo: ids query HTTP %d for %s — %s", resp.status_code, cell.name_ru,
-                     resp.text[:120])
+            if _is_reduce_data(resp):
+                # Слишком плотно даже для маленького окна — ужимаем и пробуем снова.
+                size = max(_WINDOW_MIN_DEG, size * 0.5)
+            else:
+                # Прочие коды (429/5xx/401/403) — транзиентные для одной ячейки.
+                log.info(
+                    "geo: ids HTTP %d for %s — %s", resp.status_code, cell.name_ru, resp.text[:120]
+                )
             continue
         try:
             ids = [img["id"] for img in (resp.json().get("data") or []) if img.get("id")]
         except (json.JSONDecodeError, KeyError, TypeError):
             continue
         if not ids:
+            # Пусто — расширяем окно (и сдвигаемся следующей итерацией).
+            size = min(_WINDOW_MAX_DEG, size * 1.7)
             continue
 
         image_id = random.choice(ids)
@@ -203,8 +228,12 @@ async def _fetch_cell_image(client: httpx.AsyncClient, cell: GeoCell) -> bytes |
             log.info("geo: thumb download failed for %s — %s", cell.name_ru, type(e).__name__)
             continue
 
-    log.info("geo: no usable image for %s (%s) after %d windows", cell.name_ru, cell.cca2,
-             _WINDOW_ATTEMPTS)
+    log.info(
+        "geo: no usable image for %s (%s) after %d windows",
+        cell.name_ru,
+        cell.cca2,
+        _WINDOW_ATTEMPTS,
+    )
     return None
 
 

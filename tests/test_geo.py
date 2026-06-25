@@ -7,7 +7,9 @@ from app.services.countries import Country
 from app.services.geo_mapillary import GeoLocation, GeoUnavailable
 
 
-def _country(cc: str, name_ru: str, name_en: str, lat: float, lng: float, region: str = "Europe") -> Country:
+def _country(
+    cc: str, name_ru: str, name_en: str, lat: float, lng: float, region: str = "Europe"
+) -> Country:
     return Country(
         cca2=cc,
         name_ru=name_ru,
