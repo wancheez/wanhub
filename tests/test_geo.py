@@ -75,7 +75,8 @@ def test_start_sets_targets_and_images() -> None:
     assert game.total == 3
     assert all(q.image_bytes for q in game.questions)
     assert game.geo_target_cca2 == ["US", "FR", "JP"]
-    assert game.geo_last_km == [None, None, None]
+    assert game.geo_best_km == [None, None, None]
+    assert game.geo_best_name == [None, None, None]
     assert game.questions[0].correct_text == "Соединённые Штаты Америки"
     assert game.questions[0].hint == "Америка"
 
@@ -112,15 +113,20 @@ def test_unavailable_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
         _start(chat_id=3, n=3)
 
 
-def test_warmer_colder_sequence() -> None:
-    # Раунд 0 — США. Россия (далеко) → Куба (ближе) → Аргентина (дальше Кубы).
+def test_warmer_colder_vs_best() -> None:
+    # Раунд 0 — США. Сравнение идёт с самым тёплым вариантом, не с предыдущим.
     _start(chat_id=1, n=3)
     o1 = games.submit_geo_answer(1, 10, "A", 0, "Россия")
-    assert o1.result is R.FIRST and o1.guess_name == "Россия"
+    assert o1.result is R.FIRST and o1.best_name == "Россия"
+    # Куба ближе всех → новый самый тёплый.
     o2 = games.submit_geo_answer(1, 11, "B", 0, "Куба")
-    assert o2.result is R.WARMER
+    assert o2.result is R.WARMER and o2.best_name == "Куба"
+    # Аргентина дальше Кубы (лучшего), хотя ближе России → COLDER чем Куба.
     o3 = games.submit_geo_answer(1, 12, "C", 0, "Аргентина")
-    assert o3.result is R.COLDER
+    assert o3.result is R.COLDER and o3.best_name == "Куба"
+    # Испания дальше Кубы → тоже COLDER чем Куба (а не относительно Аргентины).
+    o4 = games.submit_geo_answer(1, 13, "D", 0, "Испания")
+    assert o4.result is R.COLDER and o4.best_name == "Куба"
 
 
 def test_correct_wins_and_closes_round() -> None:

@@ -442,14 +442,15 @@ async def on_guess(message: Message) -> None:
         return
 
     guess = escape(outcome.guess_name or "")
+    best = escape(outcome.best_name or "")
     if outcome.result is R.FIRST:
-        await message.reply(f"📍 {guess} — засёк. Дальше скажу теплее или холоднее.")
+        await message.reply(f"📍 {guess} — пока самый тёплый вариант.")
     elif outcome.result is R.WARMER:
-        await message.reply(f"🔥 Теплее! ({guess})")
+        await message.reply(f"🔥 Теплее! Теперь ближе всех — {guess}.")
     elif outcome.result is R.COLDER:
-        await message.reply(f"🧊 Холоднее ({guess})")
+        await message.reply(f"🧊 Холоднее, чем {best} ({guess})")
     elif outcome.result is R.SAME:
-        await message.reply(f"🤏 Примерно так же ({guess})")
+        await message.reply(f"🤏 Примерно как {best} ({guess})")
     elif outcome.result is R.NO_COORDS:
         await message.reply(f"🤷 {guess}? Не знаю, где это.")
     # ALREADY_SOLVED / STALE_ROUND / NOT_A_COUNTRY / прочее — молча.

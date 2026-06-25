@@ -158,10 +158,12 @@ class Game:
     alias_difficulty: list[str] = field(default_factory=list)
     alias_winner_points: list[int] = field(default_factory=list)
     # Только для GameKind.GEO: загаданная страна каждого раунда (cca2) и
-    # расстояние последней догадки в км (для подсказки «теплее/холоднее»;
-    # None — в раунде ещё не было догадок с координатами).
+    # лучшая (ближайшая) догадка в раунде — расстояние и имя страны. Подсказка
+    # «теплее/холоднее» сравнивает новую догадку именно с лучшей. None — в
+    # раунде ещё не было догадок с координатами.
     geo_target_cca2: list[str] = field(default_factory=list)
-    geo_last_km: list[float | None] = field(default_factory=list)
+    geo_best_km: list[float | None] = field(default_factory=list)
+    geo_best_name: list[str | None] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -518,10 +520,10 @@ _GEO_SAME_EPS_KM = 50.0
 
 class GeoSubmitResult(Enum):
     CORRECT = "correct"  # названа загаданная страна — раунд выигран
-    WARMER = "warmer"  # ближе, чем предыдущая догадка
-    COLDER = "colder"  # дальше, чем предыдущая догадка
-    SAME = "same"  # примерно то же расстояние
-    FIRST = "first"  # первая догадка раунда — задаёт точку отсчёта
+    WARMER = "warmer"  # ближе всех — новый «самый тёплый» вариант
+    COLDER = "colder"  # дальше, чем текущий самый тёплый вариант
+    SAME = "same"  # примерно как самый тёплый вариант
+    FIRST = "first"  # первая догадка раунда — становится самой тёплой
     NO_COORDS = "no_coords"  # страна распознана, но нет её центроида
     NOT_A_COUNTRY = "not_a_country"  # текст не распознан как страна
     ALREADY_SOLVED = "already_solved"
@@ -536,6 +538,7 @@ class GeoOutcome:
     guess_name: str | None = None  # как показать распознанную догадку
     canonical_answer: str | None = None  # загаданная страна (для CORRECT/reveal)
     distance_km: float | None = None  # расстояние догадки до загаданной
+    best_name: str | None = None  # текущий самый тёплый вариант (для COLDER/SAME)
 
 
 # Резолвер «текст → страна», строится при старте партии (когда уже есть
@@ -620,7 +623,8 @@ async def start_geo_game(chat_id: int, num_questions: int, starter_id: int) -> G
     log.info("geo: game ready for chat=%d (%d rounds, %d KB)", chat_id, len(questions), total_kb)
     game = _register(chat_id, GameKind.GEO, starter_id, questions)
     game.geo_target_cca2 = [loc.cca2 for loc in locations]
-    game.geo_last_km = [None] * len(locations)
+    game.geo_best_km = [None] * len(locations)
+    game.geo_best_name = [None] * len(locations)
     return game
 
 
@@ -656,9 +660,11 @@ def submit_geo_answer(
     """Принять догадку (простым текстом) на гео-раунд.
 
     Названа загаданная страна → CORRECT (первый закрывает раунд, +1 очко через
-    `answers[q_idx][user_id] = correct_idx`). Иначе — подсказка по расстоянию:
-    ближе/дальше относительно ПРЕДЫДУЩЕЙ догадки раунда (`geo_last_km`). Неверные
-    догадки раунд не закрывают и не штрафуются.
+    `answers[q_idx][user_id] = correct_idx`). Иначе — подсказка по расстоянию
+    относительно текущего САМОГО ТЁПЛОГО (ближайшего) варианта раунда: новая
+    догадка либо становится самой тёплой (WARMER/FIRST), либо COLDER/SAME с
+    указанием лучшего варианта в `best_name`. Неверные догадки раунд не
+    закрывают и не штрафуются.
     """
     game = _games.get(chat_id)
     if game is None:
@@ -684,23 +690,31 @@ def submit_geo_answer(
 
     target = _geo_cca2_index.get(target_cca2)
     if target is None or target.lat is None or guess.lat is None:
-        # Нет координат — сравнить расстояние не можем, точку отсчёта не трогаем.
+        # Нет координат — сравнить расстояние не можем, лучший вариант не трогаем.
         return GeoOutcome(GeoSubmitResult.NO_COORDS, guess_name=guess.name_ru)
 
     dist = _haversine_km(guess.lat, guess.lng or 0.0, target.lat, target.lng or 0.0)
-    prev = game.geo_last_km[q_idx] if q_idx < len(game.geo_last_km) else None
-    if q_idx < len(game.geo_last_km):
-        game.geo_last_km[q_idx] = dist
+    best = game.geo_best_km[q_idx] if q_idx < len(game.geo_best_km) else None
+    best_name = game.geo_best_name[q_idx] if q_idx < len(game.geo_best_name) else None
 
-    if prev is None:
-        result = GeoSubmitResult.FIRST
-    elif dist < prev - _GEO_SAME_EPS_KM:
-        result = GeoSubmitResult.WARMER
-    elif dist > prev + _GEO_SAME_EPS_KM:
-        result = GeoSubmitResult.COLDER
-    else:
-        result = GeoSubmitResult.SAME
-    return GeoOutcome(result, guess_name=guess.name_ru, distance_km=dist)
+    def _set_best() -> None:
+        if q_idx < len(game.geo_best_km):
+            game.geo_best_km[q_idx] = dist
+            game.geo_best_name[q_idx] = guess.name_ru
+
+    if best is None:
+        _set_best()
+        return GeoOutcome(GeoSubmitResult.FIRST, guess_name=guess.name_ru, distance_km=dist,
+                          best_name=guess.name_ru)
+    if dist < best - _GEO_SAME_EPS_KM:
+        _set_best()
+        return GeoOutcome(GeoSubmitResult.WARMER, guess_name=guess.name_ru, distance_km=dist,
+                          best_name=guess.name_ru)
+    if dist > best + _GEO_SAME_EPS_KM:
+        return GeoOutcome(GeoSubmitResult.COLDER, guess_name=guess.name_ru, distance_km=dist,
+                          best_name=best_name)
+    return GeoOutcome(GeoSubmitResult.SAME, guess_name=guess.name_ru, distance_km=dist,
+                      best_name=best_name)
 
 
 def force_finish_geo(chat_id: int, q_idx: int) -> str | None:
