@@ -38,6 +38,7 @@ _GAME_NOUN_RE = (
     r"сделк\w*|деал\w*|deal|"
     r"загадк\w*|riddles?|"
     r"алиас\w*|alias|"
+    r"геогес\w*|геогэс\w*|геогуэс\w*|геогуес\w*|geoguess\w*|гео|geo|"
     r"блэкджек\w*|блекджек\w*|blackjack|bj)"
 )
 
@@ -106,6 +107,8 @@ def _resolve_game(word: str) -> str | None:
         return "riddles"
     if w.startswith(("алиас", "alias")):
         return "alias"
+    if w.startswith(("гео", "geo")):
+        return "geo"
     if w.startswith(("блэкджек", "блекджек", "blackjack", "bj")):
         return "blackjack"
     return None
@@ -263,6 +266,18 @@ class StartGameSkill:
                 )
             else:
                 await cmd_riddles(message)
+            return
+
+        if game_name == "geo":
+            # /geo — wizard «число раундов». Если число валидно и есть в
+            # GEO_NUM_CHOICES — стартуем сразу; иначе показываем выбор числа.
+            from app.bot.handlers.geo import cmd_geo, start_geo_from_skill
+
+            num = params["num"]
+            if num and num in games.GEO_NUM_CHOICES:
+                await start_geo_from_skill(message, num)
+            else:
+                await cmd_geo(message)
             return
 
         if game_name == "alias":

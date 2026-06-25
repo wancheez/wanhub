@@ -167,6 +167,18 @@ def test_game_match_inflection():
     }
 
 
+def test_game_match_geo_variants():
+    for phrase in ("гео", "геогессер", "geoguesser", "запусти гео", "поиграем в гео"):
+        assert extract_game_intent(phrase) == {"game": "geo", "topic": None, "num": None}, phrase
+    assert extract_game_intent("гео на 5") == {"game": "geo", "topic": None, "num": 5}
+
+
+def test_game_no_match_geo_lookalikes():
+    # «география»/«геолог» не должны запускать гео-игру
+    assert extract_game_intent("география") is None
+    assert extract_game_intent("геолог") is None
+
+
 def test_game_match_trailing_punct():
     assert extract_game_intent("запусти квиз!") == {"game": "quiz", "topic": None, "num": None}
 

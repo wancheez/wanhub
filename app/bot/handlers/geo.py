@@ -273,33 +273,43 @@ async def on_pick_num(cb: CallbackQuery) -> None:
         await cb.message.edit_text(f"🌍 Готовлю {num} локаций…")
     await cb.answer()
 
-    chat_id = cb.message.chat.id
+    game, err = await _run_geo_start(cb.message.chat.id, num, owner_id)
+    if err is not None:
+        with _suppress_edit_noop():
+            await cb.message.edit_text(err)
+        return
+    if game is not None:
+        await _send_geo(cb.message, game)
+
+
+async def _run_geo_start(chat_id: int, num: int, owner_id: int) -> tuple[games.Game | None, str | None]:
+    """Запустить гео-партию. Вернуть (game, None) либо (None, текст ошибки)."""
     try:
         await games.start_geo_game(chat_id, num, owner_id)
     except games.GameAlreadyRunning:
-        with _suppress_edit_noop():
-            await cb.message.edit_text("В этом чате уже идёт игра. /geocancel — чтобы прервать.")
-        return
+        return None, "В этом чате уже идёт игра. /geocancel — чтобы прервать."
     except games.GeoUnavailable as e:
         log.warning("geo: unavailable: %s", e)
-        with _suppress_edit_noop():
-            await cb.message.edit_text(
-                "⚠️ Geo Guesser не настроен (нет токена Mapillary). Загляни в .env.example."
-            )
-        return
+        return None, "⚠️ Geo Guesser не настроен (нет токена Mapillary). Загляни в .env.example."
     except games.NotEnoughItems:
-        with _suppress_edit_noop():
-            await cb.message.edit_text("⚠️ Не удалось набрать локаций. Попробуй ещё раз.")
-        return
+        return None, "⚠️ Не удалось набрать локаций. Попробуй ещё раз."
     except Exception:
         log.exception("geo: unexpected error in start_geo_game")
-        with _suppress_edit_noop():
-            await cb.message.edit_text("⚠️ Что-то пошло не так. Попробуй ещё раз.")
-        return
+        return None, "⚠️ Что-то пошло не так. Попробуй ещё раз."
+    return games.get_game(chat_id), None
 
-    game = games.get_game(chat_id)
+
+async def start_geo_from_skill(message: Message, num: int) -> None:
+    """Старт гео-партии из текстового скилла («гео», «геогессер на 5»)."""
+    owner_id = message.from_user.id if message.from_user else 0
+    status = await message.answer(f"🌍 Готовлю {num} локаций…")
+    game, err = await _run_geo_start(message.chat.id, num, owner_id)
+    if err is not None:
+        with _suppress_edit_noop():
+            await status.edit_text(err)
+        return
     if game is not None:
-        await _send_geo(cb.message, game)
+        await _send_geo(message, game)
 
 
 @router.callback_query(F.data.startswith(_CB_CANCEL))
@@ -400,31 +410,32 @@ async def on_stop(cb: CallbackQuery) -> None:
 # ----------------------------- guess handler (plain text) -----------------------------
 
 
-def _is_geo_guess(message: Message) -> bool:
-    """Фильтр: в чате идёт гео-раунд И текст распознаётся как страна.
+def _is_geo_active(message: Message) -> bool:
+    """Фильтр: в чате идёт гео-раунд и это обычное (не команда) текстовое сообщение.
 
-    Только тогда перехватываем сообщение как догадку. Если текст не похож на
-    страну (обычная болтовня, «Чат, …»), фильтр возвращает False — и сообщение
-    уходит дальше, к chat.py. Отсев держим в фильтре, а не в теле: матч в теле
-    пометил бы апдейт обработанным и сломал бы catch-all chat.py
-    (см. riddles._is_active_riddle_reply).
+    Пока партия активна, ВСЕ такие сообщения перехватываем как догадки —
+    распознанная страна получит ответ «теплее/холоднее», а не-страна просто
+    проглатывается (молча), чтобы не уезжать в болталку chat.py. Слэш-команды
+    (`/geocancel` и т.п.) пропускаем дальше — их ловят свои хендлеры.
     """
-    if not message.text:
+    if not message.text or message.text.startswith("/"):
         return False
     game = games.get_game(message.chat.id)
-    if game is None or game.kind is not games.GameKind.GEO or game.is_finished:
-        return False
-    return games.resolve_country(message.text) is not None
+    return game is not None and game.kind is games.GameKind.GEO and not game.is_finished
 
 
-@router.message(F.text, _is_geo_guess)
+@router.message(F.text, _is_geo_active)
 async def on_guess(message: Message) -> None:
-    """Догадка игрока (страна простым текстом): верно / теплее / холоднее."""
+    """Догадка игрока (страна простым текстом): верно / теплее / холоднее.
+
+    Не-страна молча проглатывается (фильтр уже гарантировал активный раунд) —
+    так сообщение не попадёт в болталку chat.py.
+    """
     if message.from_user is None or message.text is None:
         return
     chat_id = message.chat.id
     game = games.get_game(chat_id)
-    assert game is not None  # гарантировано фильтром _is_geo_guess
+    assert game is not None  # гарантировано фильтром _is_geo_active
 
     user = message.from_user
     user_name = user.full_name or user.username or str(user.id)
@@ -453,7 +464,7 @@ async def on_guess(message: Message) -> None:
         await message.reply(f"🤏 Примерно как {best} ({guess})")
     elif outcome.result is R.NO_COORDS:
         await message.reply(f"🤷 {guess}? Не знаю, где это.")
-    # ALREADY_SOLVED / STALE_ROUND / NOT_A_COUNTRY / прочее — молча.
+    # NOT_A_COUNTRY / ALREADY_SOLVED / STALE_ROUND — молча проглатываем.
 
 
 # ----------------------------- internals -----------------------------
