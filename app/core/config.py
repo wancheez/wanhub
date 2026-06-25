@@ -77,6 +77,20 @@ IMAGE_DAILY_LIMIT: int = _parse_int(os.getenv("IMAGE_DAILY_LIMIT", "")) or 3
 DEFAULT_QUIZ_QUESTIONS = 5
 MAX_QUIZ_QUESTIONS = 30
 
+# Mapillary (https://www.mapillary.com/) — нужен ТОЛЬКО для игры «Geo Guesser»
+# (/geo): бесплатные уличные фото с координатами. GEO_MAPILLARY_TOKEN — client
+# access token (начинается с MLY|...), берётся на mapillary.com/dashboard/developers.
+# Пусто → /geo отвечает понятной ошибкой, остальные игры работают.
+GEO_MAPILLARY_TOKEN: str = os.getenv("GEO_MAPILLARY_TOKEN", "").strip()
+GEO_MAPILLARY_API_URL: str = os.getenv(
+    "GEO_MAPILLARY_API_URL", "https://graph.mapillary.com"
+).rstrip("/")
+GEO_TIMEOUT_S: float = 6.0
+# Опциональный HTTP/SOCKS-прокси ТОЛЬКО для запросов к Mapillary (по аналогии
+# с TMDB_PROXY). Пусто → ходим напрямую.
+GEO_MAPILLARY_PROXY: str = os.getenv("GEO_MAPILLARY_PROXY", "").strip()
+GEO_MAX_QUESTIONS: int = 10
+
 # TMDB (https://www.themoviedb.org/) — нужен ХОТЯ БЫ один из двух способов
 # авторизации. TMDB_BEARER_TOKEN — v4 Read Access Token (JWT, начинается с
 # eyJ...); используется как Authorization: Bearer <token> и имеет приоритет.

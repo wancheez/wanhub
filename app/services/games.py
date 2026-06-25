@@ -11,6 +11,7 @@ LLM-генерация по теме (LLM_QUIZ), и угадайки по кад
 """
 
 import logging
+import math
 import random
 import time
 import unicodedata
@@ -20,9 +21,10 @@ from datetime import datetime
 from enum import Enum
 from html import escape
 
-from app.services import movies_db, shows_db
+from app.services import geo_mapillary, movies_db, shows_db
 from app.services.alias import AliasFailed, GeneratedAlias, generate_alias
 from app.services.countries import Country, get_countries
+from app.services.geo_mapillary import GeoUnavailable
 from app.services.llm_quiz import GeneratedQuestion, LLMQuizFailed, generate_quiz
 from app.services.movies_db import MoviesDBUnavailable  # re-exported для удобства хендлера
 from app.services.riddles import GeneratedRiddle, RiddlesFailed, generate_riddles
@@ -31,12 +33,16 @@ from app.services.shows_db import ShowsDBUnavailable  # re-exported для уд�
 log = logging.getLogger("app")
 
 __all__ = [
+    "GEO_NUM_CHOICES",
     "AdvanceResult",
     "AliasFailed",
     "Country",
     "Game",
     "GameAlreadyRunning",
     "GameKind",
+    "GeoOutcome",
+    "GeoSubmitResult",
+    "GeoUnavailable",
     "LLMQuizFailed",
     "MoviesDBUnavailable",
     "NotEnoughItems",
@@ -54,21 +60,25 @@ __all__ = [
     "compute_scores",
     "consume_hint",
     "force_finish_alias",
+    "force_finish_geo",
     "force_finish_riddle",
     "format_scoreboard",
     "get_game",
     "normalize_text_answer",
     "reset_state",
+    "resolve_country",
     "reveal_next_clue",
     "start_alias_game",
     "start_capital_game",
     "start_flag_game",
+    "start_geo_game",
     "start_llm_quiz_game",
     "start_movie_game",
     "start_riddle_game",
     "start_show_game",
     "submit_alias_answer",
     "submit_answer",
+    "submit_geo_answer",
     "submit_text_answer",
 ]
 
@@ -81,6 +91,7 @@ class GameKind(Enum):
     SHOW = "show"
     RIDDLE = "riddle"
     ALIAS = "alias"
+    GEO = "geo"
 
 
 @dataclass(frozen=True)
@@ -146,6 +157,13 @@ class Game:
     alias_clue_level: list[int] = field(default_factory=list)
     alias_difficulty: list[str] = field(default_factory=list)
     alias_winner_points: list[int] = field(default_factory=list)
+    # Только для GameKind.GEO: загаданная страна каждого раунда (cca2) и
+    # лучшая (ближайшая) догадка в раунде — расстояние и имя страны. Подсказка
+    # «теплее/холоднее» сравнивает новую догадку именно с лучшей. None — в
+    # раунде ещё не было догадок с координатами.
+    geo_target_cca2: list[str] = field(default_factory=list)
+    geo_best_km: list[float | None] = field(default_factory=list)
+    geo_best_name: list[str | None] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -475,6 +493,234 @@ def force_finish_alias(chat_id: int, q_idx: int) -> str | None:
     """Принудительно закрыть раунд алиаса (skip/timeout). Вернуть слово."""
     game = _games.get(chat_id)
     if game is None or game.kind is not GameKind.ALIAS:
+        return None
+    if q_idx != game.current_idx or game.is_finished:
+        return None
+    return game.questions[q_idx].correct_text
+
+
+# ---- GEO (угадай страну по уличному фото из Mapillary) -----------------------
+
+GEO_NUM_CHOICES: tuple[int, ...] = (3, 5, 10)
+
+# Регион страны из countries.json (на английском) → часть света по-русски,
+# показывается как подсказка в /geo.
+_REGION_RU: dict[str, str] = {
+    "Europe": "Европа",
+    "Asia": "Азия",
+    "Americas": "Америка",
+    "Africa": "Африка",
+    "Oceania": "Океания",
+    "Antarctic": "Антарктика",
+}
+
+# Если две догадки отличаются по расстоянию меньше этого — считаем «так же».
+_GEO_SAME_EPS_KM = 50.0
+
+
+class GeoSubmitResult(Enum):
+    CORRECT = "correct"  # названа загаданная страна — раунд выигран
+    WARMER = "warmer"  # ближе всех — новый «самый тёплый» вариант
+    COLDER = "colder"  # дальше, чем текущий самый тёплый вариант
+    SAME = "same"  # примерно как самый тёплый вариант
+    FIRST = "first"  # первая догадка раунда — становится самой тёплой
+    NO_COORDS = "no_coords"  # страна распознана, но нет её центроида
+    NOT_A_COUNTRY = "not_a_country"  # текст не распознан как страна
+    ALREADY_SOLVED = "already_solved"
+    STALE_ROUND = "stale_round"
+    WRONG_GAME_KIND = "wrong_game_kind"
+    NO_GAME = "no_game"
+
+
+@dataclass(frozen=True)
+class GeoOutcome:
+    result: GeoSubmitResult
+    guess_name: str | None = None  # как показать распознанную догадку
+    canonical_answer: str | None = None  # загаданная страна (для CORRECT/reveal)
+    distance_km: float | None = None  # расстояние догадки до загаданной
+    best_name: str | None = None  # текущий самый тёплый вариант (для COLDER/SAME)
+
+
+# Резолвер «текст → страна», строится при старте партии (когда уже есть
+# get_countries()). Ключи — нормализованные имена/алиасы; значения — Country.
+_geo_name_index: dict[str, Country] = {}
+_geo_cca2_index: dict[str, Country] = {}
+
+
+def _build_country_resolver(countries: list[Country]) -> None:
+    """Заполнить индексы для resolve_country: имя/алиас → Country, cca2 → Country."""
+    _geo_name_index.clear()
+    _geo_cca2_index.clear()
+    for c in countries:
+        _geo_cca2_index[c.cca2] = c
+        variants = (c.name_ru, c.name_en, *geo_mapillary.COUNTRY_ALIASES.get(c.cca2, ()))
+        for v in variants:
+            key = normalize_text_answer(v)
+            if key:
+                _geo_name_index[key] = c
+
+
+def resolve_country(text: str) -> Country | None:
+    """Распознать произвольный текст как страну (имя/алиас, с опечатками).
+
+    Сначала точное совпадение по нормализованному имени; если нет — нечёткое
+    (Левенштейн через `_matches_riddle_answer`), но только для строк ≥4 символов,
+    чтобы случайный короткий текст в чате не «прилипал» к стране. None — если
+    не похоже ни на одну страну (хендлер тогда пропустит сообщение дальше)."""
+    norm = normalize_text_answer(text)
+    if not norm:
+        return None
+    exact = _geo_name_index.get(norm)
+    if exact is not None:
+        return exact
+    if len(norm) < 4:
+        return None
+    for variant, country in _geo_name_index.items():
+        if len(variant) >= 4 and _matches_riddle_answer(norm, (variant,)):
+            return country
+    return None
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Расстояние по большому кругу между двумя точками в км."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+async def start_geo_game(chat_id: int, num_questions: int, starter_id: int) -> Game:
+    """Игра «угадай страну по уличному фото».
+
+    Локации тянутся из Mapillary в рантайме (см. `geo_mapillary.build_locations`).
+    Игроки пишут страны простым текстом; бот отвечает «теплее/холоднее» по
+    расстоянию до загаданной (центроиды — в countries.py), а назвавший её первым
+    забирает раунд. Если Mapillary не настроен — `GeoUnavailable`; если не удалось
+    собрать `num_questions` кадров — `NotEnoughItems`.
+    """
+    if chat_id in _games:
+        raise GameAlreadyRunning()
+    if num_questions not in GEO_NUM_CHOICES:
+        raise ValueError(f"unsupported num: {num_questions!r}")
+
+    locations = await geo_mapillary.build_locations(num_questions)
+    if len(locations) < num_questions:
+        log.warning(
+            "geo: only %d/%d locations collected for chat=%d",
+            len(locations),
+            num_questions,
+            chat_id,
+        )
+        raise NotEnoughItems()
+
+    countries = await get_countries()
+    _build_country_resolver(countries)
+    by_cca2 = {c.cca2: c for c in countries}
+    questions = [_build_geo_question(loc, by_cca2.get(loc.cca2)) for loc in locations]
+    total_kb = sum(len(q.image_bytes or b"") for q in questions) // 1024
+    log.info("geo: game ready for chat=%d (%d rounds, %d KB)", chat_id, len(questions), total_kb)
+    game = _register(chat_id, GameKind.GEO, starter_id, questions)
+    game.geo_target_cca2 = [loc.cca2 for loc in locations]
+    game.geo_best_km = [None] * len(locations)
+    game.geo_best_name = [None] * len(locations)
+    return game
+
+
+def _build_geo_question(loc: "geo_mapillary.GeoLocation", country: Country | None) -> Question:
+    """Собрать Question для локации: страна как ответ, континент как подсказка.
+
+    Если страны нет в countries.json (не должно случаться — cca2 берётся из
+    нашего же набора) — фолбэк на имя места из ячейки.
+    """
+    if country is not None:
+        canonical = country.name_ru
+        hint = _REGION_RU.get(country.region)
+    else:
+        canonical = loc.name_ru
+        hint = None
+    return Question(
+        prompt="🌍 Что это за страна?",
+        options=("", "", "", ""),
+        correct_idx=0,
+        correct_text=canonical,
+        hint=hint,
+        image_bytes=loc.image_bytes,
+    )
+
+
+def submit_geo_answer(
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    q_idx: int,
+    raw_text: str,
+) -> GeoOutcome:
+    """Принять догадку (простым текстом) на гео-раунд.
+
+    Названа загаданная страна → CORRECT (первый закрывает раунд, +1 очко через
+    `answers[q_idx][user_id] = correct_idx`). Иначе — подсказка по расстоянию
+    относительно текущего САМОГО ТЁПЛОГО (ближайшего) варианта раунда: новая
+    догадка либо становится самой тёплой (WARMER/FIRST), либо COLDER/SAME с
+    указанием лучшего варианта в `best_name`. Неверные догадки раунд не
+    закрывают и не штрафуются.
+    """
+    game = _games.get(chat_id)
+    if game is None:
+        return GeoOutcome(GeoSubmitResult.NO_GAME)
+    if game.kind is not GameKind.GEO:
+        return GeoOutcome(GeoSubmitResult.WRONG_GAME_KIND)
+    if q_idx != game.current_idx or game.is_finished:
+        return GeoOutcome(GeoSubmitResult.STALE_ROUND)
+    if game.answers[q_idx]:
+        return GeoOutcome(GeoSubmitResult.ALREADY_SOLVED)
+
+    canonical = game.questions[q_idx].correct_text or ""
+    target_cca2 = game.geo_target_cca2[q_idx] if q_idx < len(game.geo_target_cca2) else ""
+
+    guess = resolve_country(raw_text)
+    if guess is None:
+        return GeoOutcome(GeoSubmitResult.NOT_A_COUNTRY)
+
+    if guess.cca2 == target_cca2:
+        game.answers[q_idx][user_id] = game.questions[q_idx].correct_idx
+        game.players[user_id] = user_name
+        return GeoOutcome(GeoSubmitResult.CORRECT, guess_name=guess.name_ru, canonical_answer=canonical)
+
+    target = _geo_cca2_index.get(target_cca2)
+    if target is None or target.lat is None or guess.lat is None:
+        # Нет координат — сравнить расстояние не можем, лучший вариант не трогаем.
+        return GeoOutcome(GeoSubmitResult.NO_COORDS, guess_name=guess.name_ru)
+
+    dist = _haversine_km(guess.lat, guess.lng or 0.0, target.lat, target.lng or 0.0)
+    best = game.geo_best_km[q_idx] if q_idx < len(game.geo_best_km) else None
+    best_name = game.geo_best_name[q_idx] if q_idx < len(game.geo_best_name) else None
+
+    def _set_best() -> None:
+        if q_idx < len(game.geo_best_km):
+            game.geo_best_km[q_idx] = dist
+            game.geo_best_name[q_idx] = guess.name_ru
+
+    if best is None:
+        _set_best()
+        return GeoOutcome(GeoSubmitResult.FIRST, guess_name=guess.name_ru, distance_km=dist,
+                          best_name=guess.name_ru)
+    if dist < best - _GEO_SAME_EPS_KM:
+        _set_best()
+        return GeoOutcome(GeoSubmitResult.WARMER, guess_name=guess.name_ru, distance_km=dist,
+                          best_name=guess.name_ru)
+    if dist > best + _GEO_SAME_EPS_KM:
+        return GeoOutcome(GeoSubmitResult.COLDER, guess_name=guess.name_ru, distance_km=dist,
+                          best_name=best_name)
+    return GeoOutcome(GeoSubmitResult.SAME, guess_name=guess.name_ru, distance_km=dist,
+                      best_name=best_name)
+
+
+def force_finish_geo(chat_id: int, q_idx: int) -> str | None:
+    """Вернуть правильную страну для skip/timeout (раунд закроется через advance)."""
+    game = _games.get(chat_id)
+    if game is None or game.kind is not GameKind.GEO:
         return None
     if q_idx != game.current_idx or game.is_finished:
         return None
@@ -835,6 +1081,7 @@ _RESTART_COMMAND: dict[GameKind, str] = {
     GameKind.SHOW: "/show",
     GameKind.RIDDLE: "/riddles",
     GameKind.ALIAS: "/alias",
+    GameKind.GEO: "/geo",
 }
 
 
