@@ -173,3 +173,14 @@ def test_force_finish_geo() -> None:
     _start(chat_id=1, n=3)
     assert games.force_finish_geo(1, 0) == "Соединённые Штаты Америки"
     assert games.force_finish_geo(1, 9) is None
+
+
+def test_looks_like_guess() -> None:
+    from app.bot.handlers.geo import _looks_like_guess
+
+    assert _looks_like_guess("сирийя")  # опечатка — похоже на догадку
+    assert _looks_like_guess("дубай")  # город
+    assert _looks_like_guess("южная корея")  # 2 слова — ок
+    assert not _looks_like_guess("")  # пусто
+    assert not _looks_like_guess("🔥")  # без букв
+    assert not _looks_like_guess("это вообще какая-то длинная фраза про погоду")  # болтовня

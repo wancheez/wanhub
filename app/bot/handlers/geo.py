@@ -410,6 +410,18 @@ async def on_stop(cb: CallbackQuery) -> None:
 # ----------------------------- guess handler (plain text) -----------------------------
 
 
+def _looks_like_guess(text: str) -> bool:
+    """Похоже ли сообщение на попытку назвать страну: короткое и со словами.
+
+    Нужно, чтобы ответ «не знаю такой страны» сыпался на опечатки/города
+    («сирийя», «дубай»), но НЕ на обычную болтовню и реакции в чате.
+    """
+    t = text.strip()
+    if not (1 <= len(t) <= 32) or len(t.split()) > 3:
+        return False
+    return any(ch.isalpha() for ch in t)
+
+
 def _is_geo_active(message: Message) -> bool:
     """Фильтр: в чате идёт гео-раунд и это обычное (не команда) текстовое сообщение.
 
@@ -464,7 +476,11 @@ async def on_guess(message: Message) -> None:
         await message.reply(f"🤏 Примерно как {best} ({guess})")
     elif outcome.result is R.NO_COORDS:
         await message.reply(f"🤷 {guess}? Не знаю, где это.")
-    # NOT_A_COUNTRY / ALREADY_SOLVED / STALE_ROUND — молча проглатываем.
+    elif outcome.result is R.NOT_A_COUNTRY and _looks_like_guess(message.text):
+        await message.reply(
+            f"🤔 Не знаю такой страны: «{escape(message.text.strip())}». Попробуй ещё."
+        )
+    # ALREADY_SOLVED / STALE_ROUND / прочая болтовня — молча проглатываем.
 
 
 # ----------------------------- internals -----------------------------
