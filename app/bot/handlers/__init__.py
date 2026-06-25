@@ -9,6 +9,7 @@ from app.bot.handlers import (
     deal,
     device,
     games,
+    geo,
     llm_quiz,
     logs,
     movie,
@@ -32,6 +33,7 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(llm_quiz.router)  # /quiz + ll:* callbacks + FSM ввод темы
     dp.include_router(riddles.router)  # /riddles + rd:* callbacks + reply-ответы
     dp.include_router(alias.router)  # /alias + al:* callbacks + reply-ответы
+    dp.include_router(geo.router)  # /geo + gg:* callbacks + reply-ответы
     dp.include_router(movie.router)  # /movie + mv:* wizard callbacks
     dp.include_router(show.router)  # /show + sh:* wizard callbacks
     dp.include_router(deal.router)  # /deal + dl:* callbacks

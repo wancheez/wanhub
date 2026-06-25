@@ -345,7 +345,11 @@ def test_global_top_orders_by_points_then_medals(fresh_db: Path) -> None:
     # Оба по 6 очков: у «Голда» — два золота, у «Сильвера» — три серебра.
     deal_db.record_period_results(42, "2026-05-17T18:00:00+00:00", [(1, "Голд", 1)])
     deal_db.record_period_results(42, "2026-05-24T18:00:00+00:00", [(1, "Голд", 1)])
-    for end in ("2026-05-17T18:00:00+00:00", "2026-05-24T18:00:00+00:00", "2026-05-31T18:00:00+00:00"):
+    for end in (
+        "2026-05-17T18:00:00+00:00",
+        "2026-05-24T18:00:00+00:00",
+        "2026-05-31T18:00:00+00:00",
+    ):
         deal_db.record_period_results(42, end, [(2, "Сильвер", 2)])
     rows = deal_db.global_top_for_chat(42, limit=10)
     assert rows[0].points == rows[1].points == 6
