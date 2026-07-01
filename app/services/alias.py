@@ -23,7 +23,7 @@ from app.services.llm_usage import log_usage
 log = logging.getLogger("app")
 
 
-ALIAS_MODEL = "claude-sonnet-4-6"
+ALIAS_MODEL = "claude-sonnet-5"
 # 10 слов × ~500 токенов (5 коротких подсказок + acceptable_answers + word) ≈ 5000;
 # 6144 даёт запас.
 ALIAS_MAX_TOKENS = 6144

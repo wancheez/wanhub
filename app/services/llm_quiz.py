@@ -20,7 +20,7 @@ from app.services.llm_usage import log_usage
 log = logging.getLogger("app")
 
 
-LLM_QUIZ_MODEL = "claude-sonnet-4-6"
+LLM_QUIZ_MODEL = "claude-sonnet-5"
 # 20 вопросов * ~250 токенов = ~5000; 8192 даёт двукратный запас на длинные
 # объяснения. Меньше — обрезается финал JSON, парсинг падает.
 LLM_QUIZ_MAX_TOKENS = 8192

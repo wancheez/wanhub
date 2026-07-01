@@ -19,7 +19,7 @@ from app.services.llm_usage import log_usage
 log = logging.getLogger("app")
 
 
-RIDDLES_MODEL = "claude-sonnet-4-6"
+RIDDLES_MODEL = "claude-sonnet-5"
 # 10 загадок * ~300 токенов = ~3000; 4096 даёт запас на длинные объяснения.
 RIDDLES_MAX_TOKENS = 4096
 
