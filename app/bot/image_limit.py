@@ -10,6 +10,10 @@
   • `record_drawing(message)` — ПОСЛЕ успешной отправки картинки. Засчитывает
     одну единицу и отдельным сообщением сообщает остаток.
 
+Лимит вычисляется per-user: персональное значение из image_quota.get_limit
+(задаётся админом через /imglimit) перекрывает глобальный IMAGE_DAILY_LIMIT;
+0 в любом из них — без лимита.
+
 Админ (TELEGRAM_ADMIN_ID) не ограничивается и сообщений об остатке не получает.
 """
 
@@ -33,8 +37,15 @@ def _plural_drawings(n: int) -> str:
     return "рисований"
 
 
-def _resolve(message: Message) -> tuple[int, bool, bool]:
-    """(subject_id, is_admin, limited) для сообщения.
+def effective_limit(subject_id: int) -> int:
+    """Действующий дневной лимит субъекта: персональный, если задан, иначе
+    глобальный IMAGE_DAILY_LIMIT. 0 — без лимита."""
+    personal = image_quota.get_limit(subject_id)
+    return personal if personal is not None else IMAGE_DAILY_LIMIT
+
+
+def _resolve(message: Message) -> tuple[int, bool, int, bool]:
+    """(subject_id, is_admin, limit, limited) для сообщения.
 
     Субъект квоты обычно from_user.id, но у постов от имени канала и анонимных
     админов from_user пустой — тогда берём sender_chat.id, в крайнем случае
@@ -49,8 +60,9 @@ def _resolve(message: Message) -> tuple[int, bool, bool]:
         subject_id = message.sender_chat.id
     else:
         subject_id = message.chat.id
-    limited = IMAGE_DAILY_LIMIT > 0 and not is_admin
-    return subject_id, is_admin, limited
+    limit = 0 if is_admin else effective_limit(subject_id)
+    limited = limit > 0 and not is_admin
+    return subject_id, is_admin, limit, limited
 
 
 async def ensure_can_draw(message: Message) -> bool:
@@ -59,12 +71,12 @@ async def ensure_can_draw(message: Message) -> bool:
     False — лимит на сегодня исчерпан; пользователю уже отправлен отказ,
     вызывающий должен прекратить обработку.
     """
-    subject_id, is_admin, limited = _resolve(message)
+    subject_id, is_admin, limit, limited = _resolve(message)
     log.info(
         "image_limit: subject_id=%s admin=%s limit=%d limited=%s quota_available=%s",
         subject_id,
         is_admin,
-        IMAGE_DAILY_LIMIT,
+        limit,
         limited,
         image_quota.is_available(),
     )
@@ -75,18 +87,18 @@ async def ensure_can_draw(message: Message) -> bool:
         "image_limit: quota check subject_id=%s used=%d/%d day=%s",
         subject_id,
         used,
-        IMAGE_DAILY_LIMIT,
+        limit,
         image_quota.day_key(),
     )
-    if used >= IMAGE_DAILY_LIMIT:
+    if used >= limit:
         log.info(
             "image_limit: limit reached for subject_id=%s (%d/%d) — отказ",
             subject_id,
             used,
-            IMAGE_DAILY_LIMIT,
+            limit,
         )
         await message.answer(
-            f"На сегодня лимит рисований исчерпан ({IMAGE_DAILY_LIMIT} в день). Возвращайся завтра."
+            f"На сегодня лимит рисований исчерпан ({limit} в день). Возвращайся завтра."
         )
         return False
     return True
@@ -94,16 +106,16 @@ async def ensure_can_draw(message: Message) -> bool:
 
 async def record_drawing(message: Message) -> None:
     """Засчитать одну картинку и сообщить остаток (для не-админов под лимитом)."""
-    subject_id, _, limited = _resolve(message)
+    subject_id, _, limit, limited = _resolve(message)
     if not limited:
         return
     used = image_quota.increment(subject_id)
-    remaining = max(IMAGE_DAILY_LIMIT - used, 0)
+    remaining = max(limit - used, 0)
     log.info(
         "image_limit: counted subject_id=%s used=%d/%d remaining=%d — шлю остаток",
         subject_id,
         used,
-        IMAGE_DAILY_LIMIT,
+        limit,
         remaining,
     )
     await message.answer(f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня.")

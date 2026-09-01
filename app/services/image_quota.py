@@ -4,6 +4,11 @@ Append-light счётчик: таблица `image_usage(user_id, day, count)` �
 (user_id, day). День — календарная дата в MSK (граница суток в 00:00 МСК),
 чтобы быть согласованным с остальными окнами бота (см. *_weekly).
 
+Персональные лимиты: таблица `image_limits(user_id, limit_value)`. Если запись
+есть, она перекрывает глобальный IMAGE_DAILY_LIMIT для этого пользователя
+(0 — без лимита). Нет записи — действует глобальный. Управляется админом
+через /imglimit (см. app/bot/handlers/image_limits.py).
+
 Сбой БД не должен ломать генерацию: при недоступности SQLite выставляется
 флаг `_unavailable`, проверка лимита становится «разрешено всегда», а инкремент —
 no-op. Лучше выпустить лишнюю картинку, чем уронить скилл.
@@ -20,11 +25,15 @@ from app.services import sqlite_utils
 log = logging.getLogger("app")
 
 __all__ = [
+    "clear_limit",
     "day_key",
+    "get_limit",
     "increment",
     "init_db",
     "is_available",
+    "list_limits",
     "reset_cache",
+    "set_limit",
     "used_today",
 ]
 
@@ -40,6 +49,11 @@ CREATE TABLE IF NOT EXISTS image_usage (
     day     TEXT NOT NULL,
     count   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day)
+);
+CREATE TABLE IF NOT EXISTS image_limits (
+    user_id     INTEGER PRIMARY KEY,
+    limit_value INTEGER NOT NULL,
+    updated_at  TEXT NOT NULL
 );
 """
 
@@ -146,3 +160,99 @@ def increment(user_id: int) -> int:
         log.warning("image_quota: increment failed (%s) — лимит отключён", e)
         return 0
     return int(row["count"]) if row is not None else 0
+
+
+def _handle_error(op: str, e: BaseException) -> None:
+    """Общая обработка сбоя: транзиентную блокировку пропускаем, остальное
+    переводит модуль в no-op до рестарта."""
+    global _unavailable
+    if sqlite_utils.is_transient_error(e):
+        log.warning("image_quota: %s failed transiently (%s)", op, e)
+        return
+    _unavailable = True
+    log.warning("image_quota: %s failed (%s) — лимит отключён", op, e)
+
+
+def get_limit(user_id: int) -> int | None:
+    """Персональный лимит пользователя или None, если не задан (действует
+    глобальный). None также при сбое БД — тогда работаем по глобальному."""
+    if _unavailable:
+        return None
+    try:
+        conn = _get_connection()
+        cur = conn.execute("SELECT limit_value FROM image_limits WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+    except (sqlite3.Error, OSError) as e:
+        _handle_error("get_limit", e)
+        return None
+    return int(row["limit_value"]) if row is not None else None
+
+
+def set_limit(user_id: int, limit: int) -> bool:
+    """Задать персональный лимит (0 — без лимита). False при сбое БД."""
+    if _unavailable:
+        return False
+    if limit < 0:
+        raise ValueError("limit must be >= 0")
+    now = datetime.now(UTC).astimezone(MSK).strftime("%Y-%m-%d %H:%M")
+    try:
+        conn = _get_connection()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO image_limits (user_id, limit_value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE
+                    SET limit_value = excluded.limit_value, updated_at = excluded.updated_at
+                """,
+                (user_id, limit, now),
+            )
+    except (sqlite3.Error, OSError) as e:
+        _handle_error("set_limit", e)
+        return False
+    return True
+
+
+def clear_limit(user_id: int) -> bool:
+    """Снять персональный лимит (вернуть пользователя на глобальный).
+    True, если запись существовала и удалена."""
+    if _unavailable:
+        return False
+    try:
+        conn = _get_connection()
+        with conn:
+            cur = conn.execute("DELETE FROM image_limits WHERE user_id = ?", (user_id,))
+    except (sqlite3.Error, OSError) as e:
+        _handle_error("clear_limit", e)
+        return False
+    return cur.rowcount > 0
+
+
+def list_limits() -> list[dict]:
+    """Все персональные лимиты с сегодняшним расходом:
+    [{user_id, limit, used_today, updated_at}, …], по user_id."""
+    if _unavailable:
+        return []
+    try:
+        conn = _get_connection()
+        cur = conn.execute(
+            """
+            SELECT l.user_id, l.limit_value, l.updated_at, COALESCE(u.count, 0) AS used
+            FROM image_limits AS l
+            LEFT JOIN image_usage AS u ON u.user_id = l.user_id AND u.day = ?
+            ORDER BY l.user_id
+            """,
+            (day_key(),),
+        )
+        rows = cur.fetchall()
+    except (sqlite3.Error, OSError) as e:
+        _handle_error("list_limits", e)
+        return []
+    return [
+        {
+            "user_id": int(r["user_id"]),
+            "limit": int(r["limit_value"]),
+            "used_today": int(r["used"]),
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]

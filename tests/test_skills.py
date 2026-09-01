@@ -63,7 +63,7 @@ def test_search_match_poisk_noun_verb():
     assert r["fallback"] == "кота"
 
 
-# Глаголы доставки уехали в генерацию — поиск их больше НЕ ловит.
+# Глаголы доставки (пришли/скинь/покажи) поиск НЕ ловит — только найди/поищи/...
 
 
 def test_search_no_match_delivery_verbs():
@@ -675,7 +675,7 @@ def test_generate_match_generate_verb():
 
 
 def test_generate_match_with_pronoun():
-    assert extract_generate_intent("придумай мне логотип") == {"prompt": "логотип"}
+    assert extract_generate_intent("нарисуй мне логотип") == {"prompt": "логотип"}
 
 
 def test_generate_match_capitalized():
@@ -691,29 +691,26 @@ def test_generate_match_short_generate_verb():
     assert extract_generate_intent("сгенери пейзаж") == {"prompt": "пейзаж"}
 
 
-# Глаголы доставки (пришли/скинь/кинь/дай/отправь) тоже генерируют картинку.
-# «покажи» намеренно исключён — слишком широкий.
+# Генерация только по явным глаголам (нарисуй/сгенерируй/сгенери). Глаголы
+# доставки (пришли/скинь/кинь/дай/отправь), «придумай» и «покажи» намеренно
+# исключены — слишком широкие («пришли ссылку», «придумай название»).
 
 
-def test_generate_match_delivery_verb_bare():
-    assert extract_generate_intent("пришли кота") == {"prompt": "кота"}
+def test_generate_match_noun_stripped_after_verb():
+    # «нарисуй картинку дракона» → лишний маркер «картинку» срезается.
+    assert extract_generate_intent("нарисуй картинку дракона") == {"prompt": "дракона"}
 
 
-def test_generate_match_delivery_verb_with_noun_stripped():
-    # «скинь картинку дракона» → лишний маркер «картинку» срезается.
-    assert extract_generate_intent("скинь картинку дракона") == {"prompt": "дракона"}
+def test_generate_no_match_delivery_verbs():
+    assert extract_generate_intent("пришли кота") is None
+    assert extract_generate_intent("пришли фото кота") is None
+    assert extract_generate_intent("скинь картинку дракона") is None
+    assert extract_generate_intent("скинь пикчу пиццы.") is None
+    assert extract_generate_intent("пришли мне рыжего кота") is None
 
 
-def test_generate_match_prishli_with_noun():
-    assert extract_generate_intent("пришли фото кота") == {"prompt": "кота"}
-
-
-def test_generate_match_skin_trailing_punct():
-    assert extract_generate_intent("скинь пикчу пиццы.") == {"prompt": "пиццы"}
-
-
-def test_generate_match_delivery_with_pronoun():
-    assert extract_generate_intent("пришли мне рыжего кота") == {"prompt": "рыжего кота"}
+def test_generate_no_match_pridumay():
+    assert extract_generate_intent("придумай мне логотип") is None
 
 
 def test_generate_no_match_pokazhi():
