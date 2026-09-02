@@ -53,14 +53,37 @@ def test_set_limit_rejects_negative(fresh_db: Path) -> None:
         image_quota.set_limit(1, -1)
 
 
-def test_list_limits_with_usage(fresh_db: Path) -> None:
-    image_quota.set_limit(2, 5)
+def test_remember_name_upsert(fresh_db: Path) -> None:
+    image_quota.set_limit(1, 5)
+    image_quota.remember_name(1, "Вася")
+    assert image_quota.usage_overview()[0]["name"] == "Вася"
+    # Перезапись при смене ника.
+    image_quota.remember_name(1, "Петя")
+    assert image_quota.usage_overview()[0]["name"] == "Петя"
+    # Пустое имя — no-op.
+    image_quota.remember_name(1, "")
+    assert image_quota.usage_overview()[0]["name"] == "Петя"
+
+
+def test_usage_overview(fresh_db: Path) -> None:
+    # Юзер 1: только персональный лимит, без генераций.
     image_quota.set_limit(1, 0)
+    # Юзер 2: лимит и генерации (сегодня и в прошлом).
+    image_quota.set_limit(2, 5)
     image_quota.increment(2)
-    rows = image_quota.list_limits()
-    assert [(r["user_id"], r["limit"], r["used_today"]) for r in rows] == [
-        (1, 0, 0),
-        (2, 5, 1),
+    # Юзер 3: только генерации, глобальный лимит, есть имя.
+    image_quota.increment(3)
+    image_quota.increment(3)
+    image_quota.remember_name(3, "Вася")
+    # Историческая запись за прошлый день — попадает в total, но не в today.
+    conn = image_quota._get_connection()
+    with conn:
+        conn.execute("INSERT INTO image_usage (user_id, day, count) VALUES (2, '2020-01-01', 7)")
+    rows = image_quota.usage_overview()
+    assert [(r["user_id"], r["name"], r["limit"], r["used_today"], r["total"]) for r in rows] == [
+        (2, None, 5, 1, 8),
+        (3, "Вася", None, 2, 2),
+        (1, None, 0, 0, 0),
     ]
 
 
@@ -70,7 +93,8 @@ def test_limits_noop_when_db_unavailable(monkeypatch: pytest.MonkeyPatch) -> Non
     assert image_quota.get_limit(1) is None
     assert image_quota.set_limit(1, 3) is False
     assert image_quota.clear_limit(1) is False
-    assert image_quota.list_limits() == []
+    image_quota.remember_name(1, "Вася")  # no-op, не должен падать
+    assert image_quota.usage_overview() == []
 
 
 def test_effective_limit_prefers_personal(fresh_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:

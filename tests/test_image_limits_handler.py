@@ -33,8 +33,13 @@ def _msg(from_id: int | None = 1, reply_from_id: int | None = None) -> SimpleNam
         if reply_from_id is not None
         else None
     )
+    from_user = (
+        SimpleNamespace(id=from_id, full_name="Вася Пупкин", username="vasya")
+        if from_id is not None
+        else None
+    )
     return SimpleNamespace(
-        from_user=SimpleNamespace(id=from_id) if from_id is not None else None,
+        from_user=from_user,
         sender_chat=None,
         chat=SimpleNamespace(id=-100, type="private"),
         reply_to_message=reply,
@@ -113,3 +118,40 @@ def test_ensure_can_draw_uses_personal_limit(
         return out
 
     assert asyncio.run(run()) == [True, False, True, True]
+
+
+def test_record_drawing_remembers_name(fresh_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(image_limit, "IMAGE_DAILY_LIMIT", 3)
+    monkeypatch.setattr(image_limit, "TELEGRAM_ADMIN_ID", 999)
+    asyncio.run(image_limit.record_drawing(_msg(from_id=10)))
+    rows = image_quota.usage_overview()
+    assert [(r["user_id"], r["name"], r["total"]) for r in rows] == [(10, "Вася Пупкин", 1)]
+
+
+def test_overview_listing_output(fresh_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(image_limits, "TELEGRAM_ADMIN_ID", 1)
+    monkeypatch.setattr(image_limits, "IMAGE_DAILY_LIMIT", 3)
+    image_quota.set_limit(123, 5)
+    image_quota.increment(123)
+    image_quota.increment(456)
+    image_quota.remember_name(456, "Вася <Пупкин>")
+    msg = _msg(from_id=1)
+    asyncio.run(image_limits.cmd_imglimit(msg, SimpleNamespace(args=None)))
+    msg.answer.assert_awaited_once()
+    text = msg.answer.await_args.args[0]
+    assert "Глобальный лимит: 3 в день" in text
+    assert "<code>123</code>" in text
+    assert "5 в день (персональный)" in text
+    assert "Вася &lt;Пупкин&gt;" in text
+    assert "3 в день (глобальный)" in text
+    assert "сегодня: 1 · всего: 1" in text
+
+
+def test_build_messages_chunks_long_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [
+        {"user_id": i, "name": "Юзер " + "х" * 60, "limit": None, "used_today": 0, "total": i}
+        for i in range(100)
+    ]
+    chunks = image_limits._build_messages(rows)
+    assert len(chunks) > 1
+    assert all(len(c) <= image_limits.TG_LIMIT for c in chunks)

@@ -4,7 +4,7 @@
 пользователя (хранится в image_quota.image_limits). 0 — без лимита.
 
 Формы:
-  /imglimit                       — список персональных лимитов
+  /imglimit                       — потребление и лимиты по юзерам
   /imglimit <user_id> <n>         — задать лимит n (0 — без лимита)
   /imglimit <user_id> default     — снять персональный лимит
   /imglimit <n> | default         — то же, но user_id берётся из сообщения,
@@ -27,9 +27,11 @@ router = Router(name="image_limits")
 
 _RESET_WORDS = ("default", "reset", "off", "-")
 
+TG_LIMIT = 3500  # с запасом под лимит Telegram в 4096 символов (как в access.py)
+
 _USAGE = (
     "Использование:\n"
-    "  /imglimit — список персональных лимитов\n"
+    "  /imglimit — потребление и лимиты по юзерам\n"
     "  /imglimit &lt;user_id&gt; &lt;n&gt; — задать лимит (0 — без лимита)\n"
     "  /imglimit &lt;user_id&gt; default — снять персональный лимит\n"
     "  Ответом на сообщение пользователя: /imglimit &lt;n&gt; или /imglimit default\n\n"
@@ -72,17 +74,39 @@ def _parse_args(message: Message, args: str) -> tuple[int, int | None] | str:
     return user_id, limit
 
 
-def _fmt_list(rows: list[dict]) -> str:
+def _fmt_entry(r: dict) -> str:
+    """Одна запись обзора: имя (если есть), id, лимит, расход за день и всего."""
+    who = (
+        f"<b>{escape(r['name'])}</b> — <code>{r['user_id']}</code>"
+        if r["name"]
+        else (f"<code>{r['user_id']}</code>")
+    )
+    if r["limit"] is None:
+        limit = f"{_fmt_limit(IMAGE_DAILY_LIMIT)} (глобальный)"
+    else:
+        limit = f"{_fmt_limit(r['limit'])} (персональный)"
+    return f"{who}\n   лимит: {limit} · сегодня: {r['used_today']} · всего: {r['total']}"
+
+
+def _build_messages(rows: list[dict]) -> list[str]:
+    """Собрать сообщения обзора, не превышающие лимит Telegram (как в access.py)."""
     header = (
-        f"<b>Персональные лимиты</b> ({len(rows)})\nГлобальный: {_fmt_limit(IMAGE_DAILY_LIMIT)}"
+        f"<b>Картинки по юзерам</b> ({len(rows)})\n"
+        f"Глобальный лимит: {_fmt_limit(IMAGE_DAILY_LIMIT)}"
     )
     if not rows:
-        return f"{header}\n\nПусто."
-    lines = [header, ""]
+        return [f"{header}\n\nПусто."]
+    chunks: list[str] = []
+    buf = header
     for r in rows:
-        used = f", сегодня {r['used_today']}" if r["used_today"] else ""
-        lines.append(f"<code>{r['user_id']}</code> — {_fmt_limit(r['limit'])}{used}")
-    return "\n".join(lines)
+        entry = _fmt_entry(r)
+        if len(buf) + len(entry) + 2 > TG_LIMIT:
+            chunks.append(buf)
+            buf = entry
+        else:
+            buf = f"{buf}\n\n{entry}"
+    chunks.append(buf)
+    return chunks
 
 
 @router.message(Command("imglimit"))
@@ -97,8 +121,9 @@ async def cmd_imglimit(message: Message, command: CommandObject) -> None:
 
     args = (command.args or "").strip()
     if not args:
-        rows = await asyncio.to_thread(image_quota.list_limits)
-        await message.answer(_fmt_list(rows), parse_mode="HTML")
+        rows = await asyncio.to_thread(image_quota.usage_overview)
+        for chunk in _build_messages(rows):
+            await message.answer(chunk, parse_mode="HTML")
         return
 
     parsed = _parse_args(message, args)

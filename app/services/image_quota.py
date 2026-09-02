@@ -9,6 +9,11 @@ Append-light счётчик: таблица `image_usage(user_id, day, count)` �
 (0 — без лимита). Нет записи — действует глобальный. Управляется админом
 через /imglimit (см. app/bot/handlers/image_limits.py).
 
+Имена: таблица `user_names(user_id, name)` — отображаемое имя субъекта,
+запомненное в момент рисования (record_drawing). Общего реестра юзеров в
+проекте нет, поэтому имя денормализуется сюда, как user_name в blackjack_db
+и deal_db. Нужна только для читаемого вывода /imglimit.
+
 Сбой БД не должен ломать генерацию: при недоступности SQLite выставляется
 флаг `_unavailable`, проверка лимита становится «разрешено всегда», а инкремент —
 no-op. Лучше выпустить лишнюю картинку, чем уронить скилл.
@@ -31,9 +36,10 @@ __all__ = [
     "increment",
     "init_db",
     "is_available",
-    "list_limits",
+    "remember_name",
     "reset_cache",
     "set_limit",
+    "usage_overview",
     "used_today",
 ]
 
@@ -54,6 +60,11 @@ CREATE TABLE IF NOT EXISTS image_limits (
     user_id     INTEGER PRIMARY KEY,
     limit_value INTEGER NOT NULL,
     updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_names (
+    user_id    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -227,32 +238,66 @@ def clear_limit(user_id: int) -> bool:
     return cur.rowcount > 0
 
 
-def list_limits() -> list[dict]:
-    """Все персональные лимиты с сегодняшним расходом:
-    [{user_id, limit, used_today, updated_at}, …], по user_id."""
+def remember_name(user_id: int, name: str) -> None:
+    """Запомнить отображаемое имя субъекта (upsert). Пустое имя — no-op."""
+    if _unavailable or not name:
+        return
+    now = datetime.now(UTC).astimezone(MSK).strftime("%Y-%m-%d %H:%M")
+    try:
+        conn = _get_connection()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO user_names (user_id, name, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE
+                    SET name = excluded.name, updated_at = excluded.updated_at
+                """,
+                (user_id, name, now),
+            )
+    except (sqlite3.Error, OSError) as e:
+        _handle_error("remember_name", e)
+
+
+def usage_overview() -> list[dict]:
+    """Все субъекты с персональным лимитом или хоть одной генерацией:
+    [{user_id, name, limit, used_today, total}, …], по убыванию total.
+
+    name — запомненное имя или None; limit — персональный лимит или None
+    (действует глобальный)."""
     if _unavailable:
         return []
     try:
         conn = _get_connection()
         cur = conn.execute(
             """
-            SELECT l.user_id, l.limit_value, l.updated_at, COALESCE(u.count, 0) AS used
-            FROM image_limits AS l
-            LEFT JOIN image_usage AS u ON u.user_id = l.user_id AND u.day = ?
-            ORDER BY l.user_id
+            SELECT s.user_id,
+                   n.name,
+                   l.limit_value,
+                   COALESCE(t.today, 0) AS today,
+                   COALESCE(t.total, 0) AS total
+            FROM (SELECT user_id FROM image_usage
+                  UNION SELECT user_id FROM image_limits) AS s
+            LEFT JOIN (SELECT user_id,
+                              SUM(count) AS total,
+                              SUM(CASE WHEN day = ? THEN count ELSE 0 END) AS today
+                       FROM image_usage GROUP BY user_id) AS t ON t.user_id = s.user_id
+            LEFT JOIN image_limits AS l ON l.user_id = s.user_id
+            LEFT JOIN user_names AS n ON n.user_id = s.user_id
+            ORDER BY total DESC, s.user_id
             """,
             (day_key(),),
         )
         rows = cur.fetchall()
     except (sqlite3.Error, OSError) as e:
-        _handle_error("list_limits", e)
+        _handle_error("usage_overview", e)
         return []
     return [
         {
             "user_id": int(r["user_id"]),
-            "limit": int(r["limit_value"]),
-            "used_today": int(r["used"]),
-            "updated_at": r["updated_at"],
+            "name": r["name"],
+            "limit": int(r["limit_value"]) if r["limit_value"] is not None else None,
+            "used_today": int(r["today"]),
+            "total": int(r["total"]),
         }
         for r in rows
     ]

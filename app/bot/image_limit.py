@@ -104,9 +104,24 @@ async def ensure_can_draw(message: Message) -> bool:
     return True
 
 
+def _display_name(message: Message) -> str | None:
+    """Отображаемое имя субъекта квоты (для списка /imglimit)."""
+    if message.from_user is not None:
+        return message.from_user.full_name or message.from_user.username
+    if message.sender_chat is not None:
+        return message.sender_chat.title or message.sender_chat.username
+    return None
+
+
 async def record_drawing(message: Message) -> None:
-    """Засчитать одну картинку и сообщить остаток (для не-админов под лимитом)."""
+    """Засчитать одну картинку и сообщить остаток (для не-админов под лимитом).
+
+    Заодно запоминает имя субъекта для /imglimit — до проверки `limited`,
+    чтобы имена были и у безлимитных пользователей."""
     subject_id, _, limit, limited = _resolve(message)
+    name = _display_name(message)
+    if name:
+        image_quota.remember_name(subject_id, name)
     if not limited:
         return
     used = image_quota.increment(subject_id)
