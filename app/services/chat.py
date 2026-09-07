@@ -5,7 +5,7 @@ from datetime import datetime
 
 from anthropic import AsyncAnthropic
 
-from app.core.config import TELEGRAM_BOT_USERNAME
+from app.core.config import CHAT_MODEL, TELEGRAM_BOT_USERNAME
 from app.prompts import load as load_prompt
 from app.services.chat_history import (
     append_message,
@@ -17,7 +17,7 @@ from app.services.llm_usage import log_usage
 
 log = logging.getLogger("app")
 
-CHAT_MODEL = "claude-haiku-4-5"
+# CHAT_MODEL берётся из .env (см. app.core.config), дефолт claude-haiku-4-5.
 MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20  # how many user+assistant turns to keep in context
 MAX_PAUSE_TURN_ITERATIONS = 3  # cap server-side tool loop resumes
@@ -58,8 +58,23 @@ def _system_prompt(
 
 
 # Anthropic-hosted tools — run on Anthropic infra, no client implementation needed.
+#
+# Веб-поиск есть в двух версиях. web_search_20260209 — с динамической
+# фильтрацией: модель кодом отсеивает нерелевантные результаты до попадания
+# в контекст (точнее и дешевле по входным токенам). Доступна только на
+# Opus 4.6+, Sonnet 4.6+ и Fable 5; Haiku 4.5 её не поддерживает, для него
+# остаётся базовая web_search_20250305. Параметры и формат ответа
+# (web_search_tool_result, pause_turn) у обеих версий одинаковые.
+_WEB_SEARCH_BASIC = "web_search_20250305"
+_WEB_SEARCH_FILTERED = "web_search_20260209"
+
+
+def _web_search_tool_type(model: str) -> str:
+    return _WEB_SEARCH_BASIC if model.startswith("claude-haiku") else _WEB_SEARCH_FILTERED
+
+
 TOOLS = [
-    {"type": "web_search_20250305", "name": "web_search"},
+    {"type": _web_search_tool_type(CHAT_MODEL), "name": "web_search"},
 ]
 
 _client: AsyncAnthropic | None = None

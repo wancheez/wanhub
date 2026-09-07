@@ -58,6 +58,14 @@ WEB_SESSION_SECRET: str = os.getenv("WEB_SESSION_SECRET", "").strip()
 # /telemt and /api/telemt return 503, bot /telemt replies with a hint.
 TELEMT_METRICS_URL: str = os.getenv("TELEMT_METRICS_URL", "").strip()
 
+# Модель Anthropic для чата (Telegram-диалог и веб-чат). Пусто → дефолт
+# claude-haiku-4-5. Актуальные ID моделей API (сентябрь 2026), от дорогих
+# к дешёвым: claude-fable-5-1, claude-opus-5, claude-opus-4-8, claude-opus-4-7,
+# claude-opus-4-6, claude-sonnet-5, claude-sonnet-4-6, claude-haiku-4-5.
+# Полный список см. в .env.example. Остальные LLM-фичи (алиас, квиз, загадки,
+# ascii) используют свои модели, заданные в соответствующих сервисах.
+CHAT_MODEL: str = os.getenv("CHAT_MODEL", "").strip() or "claude-haiku-4-5"
+
 # Google Gemini API key (aistudio.google.com). Нужен ТОЛЬКО для генерации
 # картинок (Nano Banana) — скилл «нарисуй …».
 # Пусто → скилл генерации отвечает понятной ошибкой, остальное работает.
