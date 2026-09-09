@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import Any
@@ -5,10 +6,19 @@ from typing import Any
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, Message
 
-from app.bot.image_limit import ensure_can_draw, record_drawing
+from app.bot.image_limit import record_drawing, refuse_if_over_limit
+from app.services.image_archive import archive_image
 from app.services.image_generate import generate_image
+from app.services.image_memory import (
+    note_generated,
+    note_generation_failed,
+    note_quota_refused,
+    remember_image_event,
+)
 
 log = logging.getLogger("app")
+
+GEN_FAILED_REPLY = "Не получилось сгенерировать картинку, попробуй переформулировать."
 
 # Глаголы генерации картинки — только явные («нарисуй/сгенерируй/сгенери»).
 # Глаголы доставки (пришли/скинь/кинь/дай/отправь), «придумай» и «покажи»
@@ -126,25 +136,52 @@ class GenerateImageSkill:
     async def handle(self, message: Message, params: dict[str, Any], state: FSMContext) -> None:
         _ = state  # not used; FSM is wired only for skills that need it
         prompt: str = params["prompt"]
+        user_text: str = params.get("user_text") or prompt
+        chat_id = message.chat.id
 
-        if not await ensure_can_draw(message):
-            return  # лимит исчерпан, пользователю уже отвечено
+        # Каждый исход (отказ по лимиту, неудача, успех) записываем в историю
+        # чата, чтобы Claude на следующем ходу знал, что тут происходило.
+        refusal = await refuse_if_over_limit(message)
+        if refusal is not None:
+            await remember_image_event(
+                chat_id, user_text, note_quota_refused(f"генерировать картинку «{prompt}»", refusal)
+            )
+            return
 
         assert message.bot is not None  # aiogram populates this for incoming updates
-        await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+        await message.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         log.info("generate_image skill: %r", prompt)
 
         result = await generate_image(prompt)
         if result is None:
-            await message.answer(
-                "Не получилось сгенерировать картинку, попробуй переформулировать."
+            await message.answer(GEN_FAILED_REPLY)
+            await remember_image_event(
+                chat_id, user_text, note_generation_failed(prompt, GEN_FAILED_REPLY)
             )
             return
 
-        body, mime = result
-        ext = mime.removeprefix("image/").split("+")[0] or "png"
-        filename = f"{_safe_filename_stem(prompt)}.{ext}"
-        await message.answer_photo(BufferedInputFile(body, filename=filename))
-        log.info("generate_image skill: sent (%d bytes, %s)", len(body), mime)
+        # Архив — до отправки: картинка сохраняется, даже если Telegram потом упадёт.
+        await asyncio.to_thread(
+            archive_image,
+            "generate",
+            chat_id=chat_id,
+            user_id=message.from_user.id if message.from_user else None,
+            prompt=prompt,
+            result=result,
+        )
 
-        await record_drawing(message)
+        ext = result.mime.removeprefix("image/").split("+")[0] or "png"
+        filename = f"{_safe_filename_stem(prompt)}.{ext}"
+        await message.answer_photo(BufferedInputFile(result.data, filename=filename))
+        log.info("generate_image skill: sent (%d bytes, %s)", len(result.data), result.mime)
+
+        # Сначала квота (её текст идёт в заметку), потом память. Если
+        # answer_photo бросил исключение, до сюда не дойдём — ложной заметки
+        # «отправил» не будет.
+        remaining = await record_drawing(message)
+        await remember_image_event(
+            chat_id,
+            user_text,
+            note_generated(prompt, result.text, remaining),
+            (result.data, result.mime),
+        )

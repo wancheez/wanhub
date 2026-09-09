@@ -148,6 +148,12 @@ LLM_HISTORY_DB_PATH: Path = PROJECT_ROOT / "data" / "llm_history.sqlite3"
 # (см. app/services/image_quota.py). Используется для лимита IMAGE_DAILY_LIMIT.
 IMAGE_QUOTA_DB_PATH: Path = PROJECT_ROOT / "data" / "image_quota.sqlite3"
 
+# Постоянный архив сгенерированных/отредактированных картинок в полном
+# качестве (см. app/services/image_archive.py): файлы по месяцам + индекс.
+# Бекапится scripts/backup-db.sh как есть, по файлу, без ретеншна.
+IMAGE_ARCHIVE_DIR: Path = PROJECT_ROOT / "data" / "images"
+IMAGE_ARCHIVE_DB_PATH: Path = PROJECT_ROOT / "data" / "images.sqlite3"
+
 APP_TITLE = "My Web Server"
 # Семантическая версия бота. Бампить вручную при заметных изменениях; точную
 # идентификацию сборки (git-коммит) добавляет app/services/version.py. Держать

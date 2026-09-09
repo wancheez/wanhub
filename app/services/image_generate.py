@@ -8,11 +8,14 @@
   • generate_image(prompt)            — text-to-image («нарисуй …»);
   • edit_image(prompt, bytes, mime)   — image+text-to-image, правка присланного
                                         фото («сделай фон синим»).
+Оба возвращают `GeneratedImage` (байты, mime и текстовый комментарий модели,
+если она его прислала) либо None.
 
 Контракт ответа Gemini: POST на `:generateContent`, тело `contents → parts`,
 где part это либо `{text}`, либо `{inlineData:{mimeType,data}}` (base64).
-Картинка-результат приходит так же в `candidates[0].content.parts[]`. REST
-отдаёт camelCase, snake_case ловим на всякий случай.
+Картинка-результат приходит так же в `candidates[0].content.parts[]`, рядом
+может лежать text-part с коротким описанием — его сохраняем для истории чата.
+REST отдаёт camelCase, snake_case ловим на всякий случай.
 
 Каждый вызов логируется: модель, размер/тип результата, latency, finishReason,
 разбивка токенов из `usageMetadata` и грубая оценка стоимости (для моделей с
@@ -22,6 +25,7 @@
 import base64
 import logging
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -29,7 +33,21 @@ from app.core.config import GEMINI_API_KEY, GEMINI_IMAGE_MODEL
 
 log = logging.getLogger("app")
 
-__all__ = ["edit_image", "generate_image"]
+__all__ = ["GeneratedImage", "edit_image", "generate_image"]
+
+# Текстовый комментарий Gemini к картинке храним обрезанным: он идёт в историю
+# чата как контекст для Claude, простыня там не нужна.
+GEMINI_TEXT_MAX = 500
+
+
+@dataclass(frozen=True)
+class GeneratedImage:
+    """Результат генерации/правки: байты картинки, её mime и комментарий модели."""
+
+    data: bytes
+    mime: str
+    text: str | None = None
+
 
 # Модель задаётся в .env (GEMINI_IMAGE_MODEL); дефолт — gemini-3.1-flash-image.
 API_URL = (
@@ -96,11 +114,11 @@ def _log_usage(
     )
 
 
-async def _generate(parts: list[dict], op: str, subject: str) -> tuple[bytes, str] | None:
+async def _generate(parts: list[dict], op: str, subject: str) -> GeneratedImage | None:
     """Общий вызов Gemini для генерации/редактирования.
 
     `parts` — готовые части запроса (text и/или inlineData). `op` — метка для
-    логов («generate»/«edit»). Возвращает (bytes, mime) или None при любой
+    логов («generate»/«edit»). Возвращает GeneratedImage или None при любой
     ошибке.
     """
     if not GEMINI_API_KEY:
@@ -165,7 +183,10 @@ async def _generate(parts: list[dict], op: str, subject: str) -> tuple[bytes, st
         log.info("image %s: пустой ответ (finish=%s) — %s", op, finish, subject)
         return None
 
-    # Ответ может содержать и текст, и картинку — берём первую inlineData-часть.
+    # Ответ может содержать и текст, и картинку — берём первую inlineData-часть,
+    # текстовые части собираем в комментарий модели.
+    texts = [t.strip() for p in resp_parts if isinstance(t := p.get("text"), str) and t.strip()]
+    comment = " ".join(texts)[:GEMINI_TEXT_MAX] or None
     for part in resp_parts:
         inline = part.get("inlineData") or part.get("inline_data")
         if inline and inline.get("data"):
@@ -176,7 +197,7 @@ async def _generate(parts: list[dict], op: str, subject: str) -> tuple[bytes, st
                 log.warning("image %s: не декодировался base64", op)
                 return None
             _log_usage(op, usage, len(img), mime, elapsed, finish)
-            return img, mime
+            return GeneratedImage(img, mime, comment)
 
     # Пустой результат без картинки — обычно сработал safety-фильтр.
     _log_usage(op, usage, 0, "none", elapsed, finish)
@@ -184,8 +205,8 @@ async def _generate(parts: list[dict], op: str, subject: str) -> tuple[bytes, st
     return None
 
 
-async def generate_image(prompt: str) -> tuple[bytes, str] | None:
-    """Сгенерировать картинку по тексту. (bytes, mime) или None при ошибке."""
+async def generate_image(prompt: str) -> GeneratedImage | None:
+    """Сгенерировать картинку по тексту. GeneratedImage или None при ошибке."""
     if not prompt.strip():
         return None
     return await _generate([{"text": prompt}], "generate", repr(prompt[:200]))
@@ -193,11 +214,11 @@ async def generate_image(prompt: str) -> tuple[bytes, str] | None:
 
 async def edit_image(
     prompt: str, image_bytes: bytes, mime: str = "image/jpeg"
-) -> tuple[bytes, str] | None:
+) -> GeneratedImage | None:
     """Изменить присланную картинку по текстовой инструкции.
 
     `image_bytes` — исходное фото, `mime` — его тип (Telegram отдаёт JPEG).
-    Возвращает (bytes, mime) изменённой картинки или None при любой ошибке.
+    Возвращает GeneratedImage с изменённой картинкой или None при любой ошибке.
     """
     if not prompt.strip() or not image_bytes:
         return None

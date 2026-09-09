@@ -16,5 +16,9 @@ class Skill(Protocol):
 
         `state` is passed for skills that need to persist data across the next
         few callback queries (e.g. quiz topic typed in chat trigger).
+
+        `try_skills` всегда добавляет в `params` ключ `"user_text"` — исходный
+        текст пользователя (до подстановки реплая). Скиллы, которые пишут
+        событие в историю чата (services.image_memory), берут его оттуда.
         """
         ...

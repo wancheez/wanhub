@@ -5,6 +5,11 @@ from typing import Any
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, Message
 
+from app.services.image_memory import (
+    note_search_failed,
+    note_search_sent,
+    remember_image_event,
+)
 from app.services.image_query import rewrite_query
 from app.services.image_search import fetch_image_bytes, find_image_urls
 
@@ -90,18 +95,24 @@ class SendImageSkill:
         _ = state  # not used; FSM is wired only for skills that need it
         raw: str = params["raw"]
         fallback: str = params["fallback"]
+        user_text: str = params.get("user_text") or raw
+        chat_id = message.chat.id
 
         assert message.bot is not None  # aiogram populates this for incoming updates
-        await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+        await message.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
 
         # LLM rewrites natural language into a clean search query.
         # Falls back to regex-stripped text if the API call fails.
         query = await rewrite_query(raw, fallback=fallback)
         log.info("send_image skill: %r → %r", raw, query)
 
+        # Каждый исход пишем в историю чата — Claude должен знать, что искали
+        # и что в итоге ушло в чат (см. services.image_memory).
         urls = await find_image_urls(query, limit=10)
         if not urls:
-            await message.answer(f"Не нашёл картинок по «{query}».")
+            reply = f"Не нашёл картинок по «{query}»."
+            await message.answer(reply)
+            await remember_image_event(chat_id, user_text, note_search_failed(query, reply))
             return
 
         for i, url in enumerate(urls):
@@ -110,14 +121,23 @@ class SendImageSkill:
                 body, mime = data
                 ext = mime.removeprefix("image/").split("+")[0] or "jpg"
                 filename = f"{_safe_filename_stem(query)}.{ext}"
+                caption = query[:CAPTION_MAX]
                 await message.answer_photo(
                     BufferedInputFile(body, filename=filename),
-                    caption=query[:CAPTION_MAX],
+                    caption=caption,
                 )
                 log.info("send_image skill: sent candidate #%d of %d", i + 1, len(urls))
+                await remember_image_event(
+                    chat_id,
+                    user_text,
+                    note_search_sent(query, raw, url, caption),
+                    (body, mime),
+                )
                 return
 
-        await message.answer(
+        reply = (
             f"Нашёл {len(urls)} картинок по «{query}», но ни одну не получилось скачать. "
             f"Хосты блокируют hot-link — попробуй другой запрос."
         )
+        await message.answer(reply)
+        await remember_image_event(chat_id, user_text, note_search_failed(query, reply))

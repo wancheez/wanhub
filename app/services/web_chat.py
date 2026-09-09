@@ -21,7 +21,7 @@ async def web_chat(user_id: int, user_message: str, *, user_name: str | None = N
         chat_title="веб-чат",
         user_name=user_name,
     )
-    reply = await _call_anthropic(history, user_message, system, op="web_chat")
+    reply = (await _call_anthropic(history, user_message, system, op="web_chat")).text
 
     await asyncio.to_thread(web_chat_history.append_message, user_id, "user", user_message)
     if reply:

@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Восстановление живых SQLite-баз из последнего WebDAV-бекапа (обратная
-# операция к scripts/backup-db.sh). Для переезда на новую машину.
+# Восстановление живых SQLite-баз и архива картинок из WebDAV-бекапа
+# (обратная операция к scripts/backup-db.sh). Для переезда на новую машину.
 #
 # Берёт самый свежий wanhub-db-*.tar.gz с WebDAV, распаковывает и раскладывает
-# файлы по их местам (chat.sqlite3 → logs/, остальные → data/).
+# файлы по их местам (chat.sqlite3 → logs/, остальные → data/). Затем обходит
+# <WEBDAV_URL>/images/YYYY/MM/ и скачивает в data/images/ каждый файл, которого
+# локально нет (файлы write-once, FORCE для них не нужен).
 #
-# ВАЖНО: если целевой файл уже существует — скрипт падает и НИЧЕГО не трогает.
-# Это защита от затирания живой базы. Чтобы намеренно перезаписать: FORCE=1.
+# ВАЖНО: если целевой файл базы уже существует — скрипт падает и НИЧЕГО не
+# трогает. Это защита от затирания живой базы. Намеренно перезаписать: FORCE=1.
 #
 # Запуск:                ./scripts/restore-db.sh
 # Из локального архива:   ARCHIVE=/path/wanhub-db-....tar.gz ./scripts/restore-db.sh
-# С перезаписью:          FORCE=1 ./scripts/restore-db.sh
+#                         (картинки при этом не восстанавливаются)
+# С перезаписью баз:      FORCE=1 ./scripts/restore-db.sh
+# Без картинок:           SKIP_IMAGES=1 ./scripts/restore-db.sh
 #
 # Конфиг WebDAV — из .env (WEBDAV_URL / WEBDAV_USER / WEBDAV_PASS), как у бекапа.
 
@@ -32,6 +36,8 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 FORCE="${FORCE:-0}"
+SKIP_IMAGES="${SKIP_IMAGES:-0}"
+IMAGES_DIR="$PROJECT_ROOT/data/images"
 
 # Маппинг basename → каталог назначения. Должен быть зеркалом LIVE_DBS в
 # scripts/backup-db.sh: chat.sqlite3 живёт в logs/, остальные — в data/.
@@ -109,6 +115,45 @@ for f in "${FILES[@]}"; do
     install -m 644 "$EXTRACT/$f" "$dir/$f"
     ok "${dir#$PROJECT_ROOT/}/$f"
 done
+
+# --- Картинки: как есть, из <BASE>/images/YYYY/MM/, только недостающие ------
+# Имена коллекций/файлов вытаскиваем из href'ов PROPFIND (Depth: 1) уровнями:
+# images/ → годы → месяцы → файлы.
+dav_names() {  # $1 = URL коллекции; печатает имена непосредственных детей
+    "${CURL[@]}" -X PROPFIND -H 'Depth: 1' "$1" 2>/dev/null \
+        | grep -oE '<[dD]:href>[^<]+</[dD]:href>' \
+        | sed -E 's#</?[dD]:href>##g; s#/$##; s#.*/##' \
+        | grep -v '^$' | sort -u
+}
+if [[ "$SKIP_IMAGES" == "1" ]]; then
+    info "SKIP_IMAGES=1 — картинки не восстанавливаем"
+elif [[ -n "${ARCHIVE:-}" ]]; then
+    info "локальный ARCHIVE — картинки с WebDAV не скачиваем"
+else
+    echo "Картинки (images/)..."
+    fetched=0; present=0
+    mapfile -t YEARS < <(dav_names "$BASE/images/" | grep -E '^[0-9]{4}$' || true)
+    for y in "${YEARS[@]}"; do
+        mapfile -t MONTHS < <(dav_names "$BASE/images/$y/" | grep -E '^[0-9]{2}$' || true)
+        for m in "${MONTHS[@]}"; do
+            mkdir -p "$IMAGES_DIR/$y/$m"
+            mapfile -t NAMES < <(dav_names "$BASE/images/$y/$m/" | grep -vE '^[0-9]{2}$' || true)
+            for n in "${NAMES[@]}"; do
+                if [[ -e "$IMAGES_DIR/$y/$m/$n" ]]; then
+                    present=$((present+1)); continue
+                fi
+                "${CURL[@]}" -o "$IMAGES_DIR/$y/$m/$n" "$BASE/images/$y/$m/$n" \
+                    || { fail "не удалось скачать $BASE/images/$y/$m/$n"; exit 2; }
+                fetched=$((fetched+1))
+            done
+        done
+    done
+    if [[ "${#YEARS[@]}" -eq 0 ]]; then
+        info "на WebDAV нет images/"
+    else
+        ok "картинки: скачано $fetched, уже было $present"
+    fi
+fi
 
 echo
 ok "Восстановление завершено."

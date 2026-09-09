@@ -5,10 +5,13 @@
 в одну квоту. Иначе правкой фото можно было бы обойти лимит на генерацию.
 
 Две точки интеграции:
-  • `ensure_can_draw(message)` — ПЕРЕД дорогой операцией. False = лимит
-    исчерпан (пользователю уже отвечено), вызывающий должен остановиться.
+  • `refuse_if_over_limit(message)` — ПЕРЕД дорогой операцией. Возвращает
+    текст отказа, если лимит исчерпан (пользователю уже отвечено; вызывающий
+    должен остановиться), иначе None. `ensure_can_draw` — то же в виде bool.
   • `record_drawing(message)` — ПОСЛЕ успешной отправки картинки. Засчитывает
-    одну единицу и отдельным сообщением сообщает остаток.
+    одну единицу и отдельным сообщением сообщает остаток; возвращает текст
+    этого сообщения (None для безлимитных). Тексты нужны, чтобы записать
+    событие в историю чата для Claude (см. services.image_memory).
 
 Лимит вычисляется per-user: персональное значение из image_quota.get_limit
 (задаётся админом через /imglimit) перекрывает глобальный IMAGE_DAILY_LIMIT;
@@ -71,6 +74,15 @@ async def ensure_can_draw(message: Message) -> bool:
     False — лимит на сегодня исчерпан; пользователю уже отправлен отказ,
     вызывающий должен прекратить обработку.
     """
+    return await refuse_if_over_limit(message) is None
+
+
+async def refuse_if_over_limit(message: Message) -> str | None:
+    """Проверить лимит ДО генерации/правки; вернуть текст отказа или None.
+
+    Если лимит исчерпан, отказ уже отправлен пользователю — вызывающий
+    прекращает обработку и может записать этот текст в историю чата.
+    """
     subject_id, is_admin, limit, limited = _resolve(message)
     log.info(
         "image_limit: subject_id=%s admin=%s limit=%d limited=%s quota_available=%s",
@@ -81,7 +93,7 @@ async def ensure_can_draw(message: Message) -> bool:
         image_quota.is_available(),
     )
     if not limited:
-        return True
+        return None
     used = image_quota.used_today(subject_id)
     log.info(
         "image_limit: quota check subject_id=%s used=%d/%d day=%s",
@@ -97,11 +109,10 @@ async def ensure_can_draw(message: Message) -> bool:
             used,
             limit,
         )
-        await message.answer(
-            f"На сегодня лимит рисований исчерпан ({limit} в день). Возвращайся завтра."
-        )
-        return False
-    return True
+        refusal = f"На сегодня лимит рисований исчерпан ({limit} в день). Возвращайся завтра."
+        await message.answer(refusal)
+        return refusal
+    return None
 
 
 def _display_name(message: Message) -> str | None:
@@ -113,17 +124,18 @@ def _display_name(message: Message) -> str | None:
     return None
 
 
-async def record_drawing(message: Message) -> None:
+async def record_drawing(message: Message) -> str | None:
     """Засчитать одну картинку и сообщить остаток (для не-админов под лимитом).
 
-    Заодно запоминает имя субъекта для /imglimit — до проверки `limited`,
-    чтобы имена были и у безлимитных пользователей."""
+    Возвращает текст сообщения об остатке (None, если лимита нет). Заодно
+    запоминает имя субъекта для /imglimit — до проверки `limited`, чтобы имена
+    были и у безлимитных пользователей."""
     subject_id, _, limit, limited = _resolve(message)
     name = _display_name(message)
     if name:
         image_quota.remember_name(subject_id, name)
     if not limited:
-        return
+        return None
     used = image_quota.increment(subject_id)
     remaining = max(limit - used, 0)
     log.info(
@@ -133,4 +145,6 @@ async def record_drawing(message: Message) -> None:
         limit,
         remaining,
     )
-    await message.answer(f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня.")
+    text = f"Осталось {remaining} {_plural_drawings(remaining)} на сегодня."
+    await message.answer(text)
+    return text

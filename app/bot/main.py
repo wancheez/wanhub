@@ -9,7 +9,7 @@ from app.bot.auth import ChatWhitelistMiddleware
 from app.bot.handlers import register_handlers
 from app.bot.retry import RetryRequestMiddleware
 from app.core.config import TELEGRAM_ADMIN_ID, TELEGRAM_BOT_TOKEN
-from app.services import blackjack_db, deal_db, image_quota, llm_history
+from app.services import blackjack_db, deal_db, image_archive, image_quota, llm_history
 from app.services.blackjack_weekly import weekly_summary_loop as blackjack_weekly_loop
 from app.services.deal_weekly import weekly_summary_loop
 from app.services.version import get_version
@@ -56,6 +56,7 @@ async def start_bot() -> None:
     blackjack_db.init_db()
     llm_history.init_db()
     image_quota.init_db()
+    image_archive.init_db()
     register_handlers(dp)
     log.info("start_bot: handlers registered, admin_id=%s", TELEGRAM_ADMIN_ID)
 

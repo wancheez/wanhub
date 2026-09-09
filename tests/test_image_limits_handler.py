@@ -155,3 +155,33 @@ def test_build_messages_chunks_long_output(monkeypatch: pytest.MonkeyPatch) -> N
     chunks = image_limits._build_messages(rows)
     assert len(chunks) > 1
     assert all(len(c) <= image_limits.TG_LIMIT for c in chunks)
+
+
+def test_refuse_if_over_limit_returns_refusal_text(
+    fresh_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(image_limit, "IMAGE_DAILY_LIMIT", 1)
+    monkeypatch.setattr(image_limit, "TELEGRAM_ADMIN_ID", 999)
+    msg = _msg(from_id=10)
+
+    async def run() -> tuple[str | None, str | None, str | None]:
+        first = await image_limit.refuse_if_over_limit(msg)
+        remaining = await image_limit.record_drawing(msg)
+        second = await image_limit.refuse_if_over_limit(msg)
+        return first, remaining, second
+
+    first, remaining, second = asyncio.run(run())
+    assert first is None
+    assert remaining == "Осталось 0 рисований на сегодня."
+    assert second == "На сегодня лимит рисований исчерпан (1 в день). Возвращайся завтра."
+    msg.answer.assert_any_await(second)
+
+
+def test_record_drawing_returns_none_when_unlimited(
+    fresh_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(image_limit, "IMAGE_DAILY_LIMIT", 0)
+    monkeypatch.setattr(image_limit, "TELEGRAM_ADMIN_ID", 999)
+    msg = _msg(from_id=10)
+    assert asyncio.run(image_limit.record_drawing(msg)) is None
+    msg.answer.assert_not_called()
